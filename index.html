@@ -39,12 +39,58 @@
     <!-- SheetJS for Excel Processing -->
     <script src="https://cdn.sheetjs.com/xlsx-latest/package/dist/xlsx.full.min.js"></script>
     
+    <!-- SortableJS for Drag & Drop Feature -->
+    <script src="https://cdn.jsdelivr.net/npm/sortablejs@latest/Sortable.min.js"></script>
+    
     <!-- FontAwesome & Google Fonts -->
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
     
     <!-- Custom CSS (Extracted) -->
     <link rel="stylesheet" href="css/style.css">
+
+    <!-- Tambahan CSS Khusus Drag & Drop dan Inline Edit -->
+    <style>
+        /* Drag Handle Cursor */
+        .drag-handle { 
+            cursor: grab; 
+            color: #94a3b8; /* text-slate-400 */
+        }
+        .drag-handle:active { cursor: grabbing; }
+        .drag-handle:hover { color: #EE2E24; }
+        
+        /* SortableJS Ghost Item (Bayangan saat didrag) */
+        .sortable-ghost {
+            opacity: 0.5;
+            background-color: #f1f5f9; /* bg-slate-100 */
+        }
+        .dark .sortable-ghost { background-color: #334155; }
+
+        /* Inline Editable Cell */
+        .editable-cell {
+            cursor: text;
+            border-bottom: 1px dashed transparent;
+            transition: all 0.2s;
+            padding: 2px 4px;
+            margin: -2px -4px;
+            border-radius: 4px;
+            min-width: 20px;
+            display: inline-block;
+        }
+        .editable-cell:hover { border-bottom-color: #cbd5e1; }
+        .editable-cell:focus {
+            outline: none;
+            background-color: #f8fafc;
+            border-bottom-color: #3b82f6; /* blue-500 */
+            box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.1);
+        }
+        .dark .editable-cell:hover { border-bottom-color: #4b5563; }
+        .dark .editable-cell:focus {
+            background-color: #1e293b;
+            border-bottom-color: #60a5fa;
+            color: white;
+        }
+    </style>
 </head>
 <body class="bg-gray-50 text-slate-800 font-sans p-4 md:p-8 dark:bg-gray-950 dark:text-gray-100 transition-colors duration-300" onclick="window.closeDropdowns(event)">
 
@@ -610,6 +656,7 @@
                 </div>
             </div>
 
+            <!-- Display Data Tab (Akan ditambahkan drag handle di UI.js) -->
             <div id="content-display" class="absolute inset-0 p-8 hidden flex flex-col bg-white dark:bg-gray-900">
                  <div class="flex justify-between items-center mb-6">
                     <h4 class="font-bold text-slate-800 dark:text-white">Sheet: display_ring</h4>
@@ -623,6 +670,7 @@
                 </div>
             </div>
 
+            <!-- Tenant Data Tab (Akan ditambahkan drag handle di UI.js) -->
             <div id="content-data" class="absolute inset-0 p-8 hidden flex flex-col bg-white dark:bg-gray-900">
                 <div class="flex flex-col md:flex-row justify-between items-center mb-6 gap-4">
                     <div class="relative w-full md:w-80">
@@ -644,8 +692,10 @@
                 </div>
                 <div class="flex-1 overflow-auto rounded-xl border border-gray-200 dark:border-gray-800">
                     <table class="min-w-full divide-y divide-gray-200 dark:divide-gray-800">
-                        <thead class="bg-gray-50 dark:bg-gray-800 sticky-header">
+                        <thead class="bg-gray-50 dark:bg-gray-800 sticky-header" id="data-table-head">
                             <tr>
+                                <!-- Kolom kosong untuk icon drag -->
+                                <th class="py-3 px-2 text-center text-xs font-bold text-gray-500 dark:text-gray-400 uppercase w-8"></th>
                                 <th class="py-3 px-6 text-left text-xs font-bold text-gray-500 dark:text-gray-400 uppercase">STRNO</th>
                                 <th class="py-3 px-6 text-left text-xs font-bold text-gray-500 dark:text-gray-400 uppercase">ABCKZ</th>
                                 <th class="py-3 px-6 text-left text-xs font-bold text-gray-500 dark:text-gray-400 uppercase">PLTXT</th>
