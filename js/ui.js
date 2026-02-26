@@ -1,6 +1,5 @@
 import { appState, GameSystem } from './store.js';
 import { generateSVG, applyZoom } from './visualizer.js';
-import { downloadSingleExcel } from './utils.js'; // Tambahkan import ini
 
 // --- DARK MODE LOGIC ---
 export function toggleDarkMode() {
@@ -250,15 +249,6 @@ export function updateDashboardUI() {
     if (el('badge-sap-pass')) el('badge-sap-pass').innerText = appState.stats.pass;
 }
 
-// --- FUNGSI DOWNLOAD SINGLE ROW (Baru ditambahkan) ---
-export function downloadRowXlsx(fileName) {
-    const item = appState.processed[fileName];
-    if(item && item.wb) {
-        // Panggil fungsi dari utils.js untuk mendownload array buffer excel
-        downloadSingleExcel(item.wb, `VALIDATED_v4_${item.fileName}`);
-    }
-}
-
 export function updateRowStatusUI(rowId, item) {
     const row = document.getElementById(rowId);
     if (!row) return;
@@ -285,7 +275,6 @@ export function updateRowStatusUI(rowId, item) {
     const toggleTitle = item.status === 'PASS' ? 'Force Fail' : 'Force Pass';
     const toggleColor = item.status === 'PASS' ? 'text-red-500 hover:bg-red-50' : 'text-green-500 hover:bg-green-50';
 
-    // Perbaikan: Ubah window.downloadXlsxFile menjadi window.downloadRowXlsx
     actionCell.innerHTML = `
         <div class="flex items-center justify-center gap-2">
             <button onclick="window.openVisualizer('${item.fileName}')" class="bg-slate-100 hover:bg-slate-200 dark:bg-gray-700 dark:hover:bg-gray-600 text-slate-700 dark:text-white p-2 rounded-lg transition" title="Visualize">
@@ -294,7 +283,7 @@ export function updateRowStatusUI(rowId, item) {
             <button onclick="window.toggleForceStatus('${item.fileName}')" class="bg-white border border-gray-200 dark:bg-gray-800 dark:border-gray-600 ${toggleColor} p-2 rounded-lg transition" title="${toggleTitle}">
                <i class="fa-solid ${toggleIcon}"></i>
             </button>
-            <button onclick="window.downloadRowXlsx('${item.fileName}')" class="bg-blue-50 hover:bg-blue-100 dark:bg-blue-900/20 dark:hover:bg-blue-900/40 text-blue-600 dark:text-blue-300 p-2 rounded-lg transition" title="Download XLSX">
+            <button onclick="window.downloadBatchFile('${item.fileName}')" class="bg-blue-50 hover:bg-blue-100 dark:bg-blue-900/20 dark:hover:bg-blue-900/40 text-blue-600 dark:text-blue-300 p-2 rounded-lg transition" title="Download XLSX">
                <i class="fa-solid fa-file-excel"></i>
             </button>
             <button onclick="window.downloadSapTxt('${item.fileName}')" class="bg-emerald-50 hover:bg-emerald-100 dark:bg-emerald-900/20 dark:hover:bg-emerald-900/40 text-emerald-600 dark:text-emerald-300 p-2 rounded-lg transition" title="Download SAP TXT">
@@ -464,6 +453,7 @@ export function openVisualizer(fileName) {
     updateVerifyButton(GameSystem.isVerified(data.pid));
 
     appState.currentData = data.belowData.map(r => ({
+        _uuid: r._uuid, // Bawa _uuid untuk fitur Drag & Drop / Edit
         strno: String(r.STRNO || ""),
         pltxt: String(r.PLTXT || ""),
         abckz: String(r.ABCKZ || ""),
@@ -498,9 +488,12 @@ export function renderDisplayRingTable(displayData) {
     }
 
     const allKeys = Object.keys(displayData[0]);
-    const columns = allKeys.filter(k => k !== 'PID' && k !== 'RING_ID');
+    // Jangan tampilkan kolom _uuid dan atribut internal lainnya di header UI
+    const columns = allKeys.filter(k => k !== 'PID' && k !== 'RING_ID' && k !== '_uuid');
 
     let headerHTML = '<tr>';
+    // Kolom header kosong untuk Ikon Drag Handle
+    headerHTML += `<th class="py-3 px-2 text-center text-xs font-bold text-gray-500 dark:text-gray-400 uppercase w-8 sticky-header border-b border-gray-100 dark:border-gray-800"></th>`;
     columns.forEach(col => {
         headerHTML += `<th class="px-4 py-3 text-left text-xs font-bold text-gray-500 dark:text-gray-400 uppercase tracking-wider sticky-header border-b border-gray-100 dark:border-gray-800">${col.replace(/_/g, ' ')}</th>`;
     });
@@ -510,10 +503,16 @@ export function renderDisplayRingTable(displayData) {
     displayData.forEach(row => {
         const tr = document.createElement('tr');
         tr.className = "hover:bg-gray-50 dark:hover:bg-gray-800/50 transition";
-        let rowHTML = '';
+        tr.setAttribute('data-uuid', row._uuid || ''); // Embed UUID untuk pelacakan baris
+
+        // Kolom pertama berisi ikon Hamburger (Drag Handle)
+        let rowHTML = `<td class="px-2 py-2 border-b border-gray-50 dark:border-gray-800 text-center align-middle"><i class="fa-solid fa-bars drag-handle text-gray-400 hover:text-mitratel-red transition-colors"></i></td>`;
+        
         columns.forEach(col => {
-            rowHTML += `<td class="px-4 py-2 border-b border-gray-50 dark:border-gray-800 text-slate-600 dark:text-gray-300 whitespace-nowrap">${row[col] || '-'}</td>`;
+            // Jadikan setiap sel bisa diedit dengan contenteditable dan class editable-cell
+            rowHTML += `<td class="px-4 py-2 border-b border-gray-50 dark:border-gray-800 text-slate-600 dark:text-gray-300 whitespace-nowrap editable-cell" contenteditable="true" data-col="${col}">${row[col] || '-'}</td>`;
         });
+        
         tr.innerHTML = rowHTML;
         tbody.appendChild(tr);
     });
@@ -646,20 +645,25 @@ export function renderTablePage() {
     const pageData = appState.filteredData.slice(startIdx, startIdx + appState.rowsPerPage);
 
     if (pageData.length === 0) {
-        tbody.innerHTML = `<tr><td colspan="5" class="py-8 text-center text-gray-400 italic">No data found matching your search</td></tr>`;
+        tbody.innerHTML = `<tr><td colspan="6" class="py-8 text-center text-gray-400 italic">No data found matching your search</td></tr>`;
         return;
     }
 
     pageData.forEach(row => {
         const tr = document.createElement('tr');
+        tr.setAttribute('data-uuid', row._uuid || ''); // Embed UUID untuk pelacakan baris
+        
         const isMatch = appState.targetPID && row.pltxt.includes(appState.targetPID);
         if(isMatch) tr.classList.add('row-highlight');
+        
+        // Render baris dengan ikon drag dan cell yang editable
         tr.innerHTML = `
-            <td class="py-2 px-6 text-sm font-mono text-slate-600 dark:text-gray-300">${row.strno}</td>
-            <td class="py-2 px-6 text-sm text-slate-800 dark:text-white font-medium">${row.abckz}</td>
-            <td class="py-2 px-6 text-sm ${isMatch ? 'font-bold text-mitratel-red' : 'text-slate-800 dark:text-white'}">${row.pltxt || '-'}</td>
-            <td class="py-2 px-6 text-sm text-slate-500 dark:text-gray-400">${row.stort || '-'}</td>
-            <td class="py-2 px-6 text-sm text-slate-500 dark:text-gray-400">${row.arbpl || '-'}</td>
+            <td class="py-2 px-2 text-center align-middle"><i class="fa-solid fa-bars drag-handle text-gray-400 hover:text-mitratel-red transition-colors"></i></td>
+            <td class="py-2 px-6 text-sm font-mono text-slate-600 dark:text-gray-300 editable-cell" contenteditable="true" data-col="STRNO">${row.strno}</td>
+            <td class="py-2 px-6 text-sm text-slate-800 dark:text-white font-medium editable-cell" contenteditable="true" data-col="ABCKZ">${row.abckz}</td>
+            <td class="py-2 px-6 text-sm ${isMatch ? 'font-bold text-mitratel-red' : 'text-slate-800 dark:text-white'} editable-cell" contenteditable="true" data-col="PLTXT">${row.pltxt || '-'}</td>
+            <td class="py-2 px-6 text-sm text-slate-500 dark:text-gray-400 editable-cell" contenteditable="true" data-col="STORT">${row.stort || '-'}</td>
+            <td class="py-2 px-6 text-sm text-slate-500 dark:text-gray-400 editable-cell" contenteditable="true" data-col="ARBPL">${row.arbpl || '-'}</td>
         `;
         tbody.appendChild(tr);
     });
