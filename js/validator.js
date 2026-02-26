@@ -487,70 +487,70 @@ export async function processFile(file, rowId) {
             const wsDisplay = XLSX.utils.json_to_sheet(exportDisplayData);
             XLSX.utils.book_append_sheet(newWb, wsDisplay, "display_ring");
         }
-
-        if (errors.length > 0) {
-            const wsErr = XLSX.utils.json_to_sheet(errors);
-            XLSX.utils.book_append_sheet(newWb, wsErr, "ERROR_LOG");
+        } catch (err) {
+            console.error(err);
+            statusCell.innerHTML = `<span class="bg-gray-200 text-gray-600 dark:bg-gray-700 dark:text-gray-300 py-1 px-3 rounded-md text-xs font-bold uppercase">Error</span>`;
+            msgCell.innerText = err.message;
+            verifiedCell.innerHTML = "-";
+            actionCell.innerHTML = "-";
+            appState.stats.total++;
+            appState.stats.fail++;
+            updateDashboardUI();
         }
-        
-        if (warnings.length > 0) {
-             const wsWarn = XLSX.utils.json_to_sheet(warnings);
-             XLSX.utils.book_append_sheet(newWb, wsWarn, "WARNING_LOG");
-        }
-
-        const summary = [
-            { ITEM: "STATUS", VALUE: statusStr },
-            { ITEM: "TOTAL_ERRORS", VALUE: errors.length },
-            { ITEM: "TOTAL_WARNINGS", VALUE: warnings.length },
-            { ITEM: "CHECKED_SHEETS", VALUE: "below_ring, display_ring" }
-        ];
-        const wsSum = XLSX.utils.json_to_sheet(summary);
-        XLSX.utils.book_append_sheet(newWb, wsSum, "VALIDATION_SUMMARY");
-
-        appState.processed[file.name] = {
-            fileName: file.name,
-            wb: newWb, 
-            belowData: belowData,
-            displayData: displayData,
-            pid: anchorPid, 
-            status: statusStr,
-            errors: errors,
-            warnings: warnings, 
-            sapTxt: sapTxt,
-            rowId: rowId,
-            isManuallyOverridden: false 
-        };
-        
-        appState.processedKeys = Object.keys(appState.processed);
-
-        // UI Updates
-        updateRowStatusUI(rowId, appState.processed[file.name]);
-        updateTableRowVerifiedStatus(rowId, anchorPid);
-
-        if (statusStr === "PASS") {
-             msgCell.innerHTML = "<span class='text-green-600 dark:text-green-400 font-medium'><i class='fa-solid fa-check-circle mr-1'></i> Validated Successfully</span>";
-        } else if (statusStr === "WARNING") {
-             msgCell.innerHTML = `<span class='text-orange-600 dark:text-orange-400 font-medium'><i class='fa-solid fa-triangle-exclamation mr-1'></i> Found ${warnings.length} warnings</span>`;
-        } else {
-             msgCell.innerHTML = `<span class='text-red-600 dark:text-red-400 font-medium'><i class='fa-solid fa-xmark mr-1'></i> Found ${errors.length} errors</span>`;
-        }
-
-        if(window.currentQueueFilter && window.currentQueueFilter !== 'all') {
-            filterQueueTable();
-        } else if(document.getElementById('queueSearch') && document.getElementById('queueSearch').value.trim() !== "") {
-            filterQueueTable();
-        }
-
-    } catch (err) {
-        console.error(err);
-        statusCell.innerHTML = `<span class="bg-gray-200 text-gray-600 dark:bg-gray-700 dark:text-gray-300 py-1 px-3 rounded-md text-xs font-bold uppercase">Error</span>`;
-        msgCell.innerText = err.message;
-        verifiedCell.innerHTML = "-";
-        actionCell.innerHTML = "-";
-        appState.stats.total++;
-        appState.stats.fail++;
-        updateDashboardUI();
     }
+
+export function syncProcessedData(fileName) {
+    const item = appState.processed[fileName];
+    if (!item) return;
+
+    // 1 & 2. Siapkan data tanpa _uuid, _rowIndex, dan STRNO_LENGTH untuk ekspor
+    const exportBelowData = item.belowData.map(r => {
+        const { STRNO_LENGTH, _rowIndex, _uuid, ...rest } = r; 
+        return rest;
+    });
+
+    // 3. Build ulang string sapTxt
+    const allKeys = Object.keys(exportBelowData[0] || {});
+    const headerOrder = ['STRNO', ...allKeys.filter(k => k !== 'STRNO')]; 
+    
+    item.sapTxt = buildSapTxtFromRows(exportBelowData, headerOrder);
+
+    // 4. Buat workbook Excel baru
+    const newWb = XLSX.utils.book_new();
+    
+    const wsBelow = XLSX.utils.json_to_sheet(exportBelowData, { header: headerOrder });
+    XLSX.utils.book_append_sheet(newWb, wsBelow, "below_ring");
+
+    if (item.displayData && item.displayData.length > 0) {
+        const exportDisplayData = item.displayData.map(r => {
+            const { _uuid, ...rest } = r;
+            return rest;
+        });
+        const wsDisplay = XLSX.utils.json_to_sheet(exportDisplayData);
+        XLSX.utils.book_append_sheet(newWb, wsDisplay, "display_ring");
+    }
+
+    if (item.errors && item.errors.length > 0) {
+        const wsErr = XLSX.utils.json_to_sheet(item.errors);
+        XLSX.utils.book_append_sheet(newWb, wsErr, "ERROR_LOG");
+    }
+    
+    if (item.warnings && item.warnings.length > 0) {
+         const wsWarn = XLSX.utils.json_to_sheet(item.warnings);
+         XLSX.utils.book_append_sheet(newWb, wsWarn, "WARNING_LOG");
+    }
+
+    const summary = [
+        { ITEM: "STATUS", VALUE: item.status },
+        { ITEM: "TOTAL_ERRORS", VALUE: item.errors ? item.errors.length : 0 },
+        { ITEM: "TOTAL_WARNINGS", VALUE: item.warnings ? item.warnings.length : 0 },
+        { ITEM: "CHECKED_SHEETS", VALUE: "below_ring, display_ring" }
+    ];
+    const wsSum = XLSX.utils.json_to_sheet(summary);
+    XLSX.utils.book_append_sheet(newWb, wsSum, "VALIDATION_SUMMARY");
+
+    // Ganti workbook lama dengan yang sudah di-update
+    item.wb = newWb;
 }
 
 // --- EXPORT REPORTS & SAP ---
