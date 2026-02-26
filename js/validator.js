@@ -95,9 +95,33 @@ export async function processFile(file) {
                 
                 if (!wb.Sheets['below_ring']) throw new Error("Missing 'below_ring' sheet.");
 
-                const rawBelow = XLSX.utils.sheet_to_json(wb.Sheets['below_ring'], { defval: "" });
+                let rawBelow = XLSX.utils.sheet_to_json(wb.Sheets['below_ring'], { defval: "" });
                 const rawDisplay = wb.Sheets['display_ring'] ? XLSX.utils.sheet_to_json(wb.Sheets['display_ring'], { defval: "" }) : [];
                 
+                // RESTORASI 1: SORTING BERDASARKAN STRNO (A-Z)
+                rawBelow.sort((a, b) => {
+                    const strA = String(a.STRNO || "").toUpperCase();
+                    const strB = String(b.STRNO || "").toUpperCase();
+                    if (strA < strB) return -1;
+                    if (strA > strB) return 1;
+                    return 0;
+                });
+
+                // Ambil PID
+                let anchorPid = extractAnchorPid(rawBelow) || extractAnchorPid(file.name);
+                if (!anchorPid && rawBelow[0] && rawBelow[0].PLTXT) {
+                     const match = String(rawBelow[0].PLTXT).match(/(PID-\d+)/i);
+                     if (match) anchorPid = match[1].toUpperCase();
+                }
+
+                // RESTORASI 2: PENGGANTIAN NAMA SPAN MENJADI NAMA RING
+                if (rawBelow.length > 0 && anchorPid) {
+                    let spanRow = rawBelow.find(r => String(r.STRNO || "").length === 17);
+                    if (spanRow && String(spanRow.PLTXT || "").toUpperCase().includes("SPAN")) {
+                        spanRow.PLTXT = anchorPid;
+                    }
+                }
+
                 const belowData = rawBelow.map((r, i) => ({ ...r, _rowIndex: i + 2, _uuid: crypto.randomUUID() }));
                 const displayData = rawDisplay.map((r, i) => ({ ...r, _rowIndex: i + 2, _uuid: crypto.randomUUID() }));
 
@@ -105,9 +129,6 @@ export async function processFile(file) {
                 const warnings = [];
                 let fileStatus = "PASS";
                 
-                // Ambil PID (Penyelesaian bug fungsi utils.js)
-                let anchorPid = extractAnchorPid(belowData) || extractAnchorPid(file.name);
-
                 if (belowData.length === 0) {
                     reportIssue('R7', 'Sheet', 'below_ring is empty', 'FAIL', errors, warnings);
                 } else {
@@ -117,8 +138,6 @@ export async function processFile(file) {
                     });
 
                     let seqGroups = {};
-                    let parentChildMap = {};
-                    let elementTypes = {};
 
                     belowData.forEach(row => {
                         const rIdx = row._rowIndex;
@@ -149,42 +168,63 @@ export async function processFile(file) {
                                 reportIssue('R15', strno, `Invalid STRNO length (${len}). Must be 17, 21, 26, or 30`, 'FAIL', errors, warnings);
                             }
 
-                            // R19 Mapping: Extract Parent
-                            let parentStrno = "";
-                            if (len === 21) parentStrno = strno.substring(0, 17);
-                            if (len === 26) parentStrno = strno.substring(0, 21);
-                            if (len === 30) parentStrno = strno.substring(0, 26);
+                            // RESTORASI 3: R11 & R14 & R17 Logic as Original Monolith
+                            if (len >= 26) {
+                                // R11 Regex
+                                const rx11 = /-(FDC|ODC|FAT|JB|SJB|TB|ODP|FDT|SPL|T|P|G)(\d{2})$/i;
+                                if (!rx11.test(strno)) {
+                                    reportIssue('R11', strno, `Tagging elemen pada STRNO tidak standar: ${strno}`, 'FAIL', errors, warnings);
+                                }
 
-                            if (parentStrno) {
-                                if (!parentChildMap[parentStrno]) parentChildMap[parentStrno] = [];
-                                parentChildMap[parentStrno].push(strno);
+                                // R14 Regex
+                                let expectedAbckz = "";
+                                if (/-(FDC|FAT|JB|SJB|TB|ODP)(\d{2})$/i.test(strno)) expectedAbckz = "OC";
+                                else if (/-(FDT)(\d{2})$/i.test(strno)) expectedAbckz = "JC";
+                                else if (/-(SPL)(\d{2})$/i.test(strno)) expectedAbckz = "DP";
+                                else if (/-(ODC)(\d{2})$/i.test(strno)) expectedAbckz = "KU";
+
+                                if (expectedAbckz && abckz !== expectedAbckz) {
+                                    reportIssue('R14', strno, `ABCKZ salah. STRNO ${strno} seharusnya ${expectedAbckz}`, 'FAIL', errors, warnings);
+                                }
+
+                                // R17 Grouping logic
+                                const m = strno.match(/(.*?-[A-Z]+)(\d{2})$/i);
+                                if (m) {
+                                    const base = m[1].toUpperCase();
+                                    const num = parseInt(m[2], 10);
+                                    if (!seqGroups[base]) seqGroups[base] = [];
+                                    seqGroups[base].push({ strno: strno, num: num, row: rIdx, abckz: abckz, pltxt: pltxt });
+                                }
                             }
 
-                            // R11, R14, R17 Logic
-                            if (len >= 26) {
-                                const tagMatch = strno.match(/-([A-Z]+)(\d+)$/i);
-                                if (!tagMatch) {
-                                    reportIssue('R11', strno, `Invalid tag format in STRNO (Expected -TAG01)`, 'FAIL', errors, warnings);
-                                } else {
-                                    const tag = tagMatch[1].toUpperCase();
-                                    const num = parseInt(tagMatch[2], 10);
-                                    elementTypes[strno] = tag;
+                            // RESTORASI 4: R16 Cascaded Splitter (Anti-Split)
+                            if (/-(SPL)(\d{2})$/i.test(strno)) {
+                                let parentStrno = strno.substring(0, 21);
+                                if (/-(SPL)(\d{2})$/i.test(parentStrno)) {
+                                    reportIssue('R16', strno, `Cascaded Splitter terdeteksi: ${strno}`, 'WARNING', errors, warnings);
+                                }
+                            }
 
-                                    // R14: ABCKZ vs Tag Consistency
-                                    let expectedAbckz = "";
-                                    if (["FDC", "FAT", "JB", "SJB", "TB", "ODP"].includes(tag)) expectedAbckz = "OC";
-                                    else if (["FDT"].includes(tag)) expectedAbckz = "JC";
-                                    else if (["SPL"].includes(tag)) expectedAbckz = "DP";
-                                    else if (["ODC"].includes(tag)) expectedAbckz = "KU";
+                            // RESTORASI 5: R18 High Occupancy (Filter counting as original)
+                            if (len === 21 && /-(ODC)(\d{2})$/i.test(strno)) {
+                                let childCount = belowData.filter(r => r.STRNO && String(r.STRNO).startsWith(strno) && String(r.STRNO).length === 26).length;
+                                if (childCount >= 129) {
+                                    reportIssue('R18', strno, `High occupancy pada ODC (>90%): ${childCount} port terisi`, 'WARNING', errors, warnings);
+                                }
+                            } else if (len === 26 && /-(FAT|ODP)(\d{2})$/i.test(strno)) {
+                                let childCount = belowData.filter(r => r.STRNO && String(r.STRNO).startsWith(strno) && String(r.STRNO).length === 30).length;
+                                if (childCount >= 7) {
+                                    reportIssue('R18', strno, `High occupancy pada FAT/ODP (>90%): ${childCount} port terisi`, 'WARNING', errors, warnings);
+                                }
+                            }
 
-                                    if (expectedAbckz && abckz !== expectedAbckz) {
-                                        reportIssue('R14', strno, `Tag '${tag}' expects ABCKZ '${expectedAbckz}', but got '${abckz}'`, 'FAIL', errors, warnings);
-                                    }
-
-                                    // R17 Grouping
-                                    const baseKey = `${stort}_${arbpl}_${tag}`; // Base sequence grouping
-                                    if (!seqGroups[baseKey]) seqGroups[baseKey] = [];
-                                    seqGroups[baseKey].push({ strno, num, abckz, pltxt });
+                            // RESTORASI 6: R19 Connectivity
+                            if (len > 17) {
+                                let parentLen = (len === 21) ? 17 : (len === 26) ? 21 : 26;
+                                let parentStrno = strno.substring(0, parentLen);
+                                let parentExists = belowData.some(r => r.STRNO === parentStrno);
+                                if (!parentExists) {
+                                    reportIssue('R19', strno, `Parent tidak ditemukan untuk STRNO: ${strno}`, 'WARNING', errors, warnings);
                                 }
                             }
                         }
@@ -203,57 +243,18 @@ export async function processFile(file) {
                         const actualStart = firstItem.num;
 
                         if (actualStart !== expectedStart && actualStart !== 1) { 
-                            reportIssue('R17', firstItem.strno, `Starts with ${actualStart}, expected ${expectedStart} or 1`, 'FAIL', errors, warnings);
+                            reportIssue('R17', firstItem.strno, `Nomor urut dimulai dari ${actualStart}, seharusnya ${expectedStart} atau 1`, 'FAIL', errors, warnings);
                         }
 
                         for (let i = 0; i < items.length - 1; i++) {
                             const diff = items[i+1].num - items[i].num;
                             if (diff > 1) {
-                                reportIssue('R17', items[i+1].strno, `Numbering gap: jumps from ${items[i].num} to ${items[i+1].num}`, 'FAIL', errors, warnings);
+                                reportIssue('R17', items[i+1].strno, `Lompatan nomor urut: dari ${items[i].num} ke ${items[i+1].num}`, 'FAIL', errors, warnings);
                             } else if (diff === 0) {
-                                reportIssue('R17', items[i+1].strno, `Duplicate sequential number: ${items[i].num}`, 'FAIL', errors, warnings);
+                                reportIssue('R17', items[i+1].strno, `Nomor urut duplikat: ${items[i].num}`, 'FAIL', errors, warnings);
                             }
                         }
                     }
-
-                    // ====================================
-                    // R16, R18, R19: TOPOLOGY CHECKS
-                    // ====================================
-                    belowData.forEach(row => {
-                        const strno = row.STRNO;
-                        if (!strno) return;
-                        
-                        const children = parentChildMap[strno] || [];
-                        const tag = elementTypes[strno];
-
-                        // R19: Connectivity (Parent Check)
-                        if (strno.length > 17 && strno.length <= 30) {
-                             let parentStrno = "";
-                             if (strno.length === 21) parentStrno = strno.substring(0, 17);
-                             if (strno.length === 26) parentStrno = strno.substring(0, 21);
-                             if (strno.length === 30) parentStrno = strno.substring(0, 26);
-
-                             const parentExists = belowData.some(r => r.STRNO === parentStrno);
-                             if (!parentExists) {
-                                 reportIssue('R19', strno, `Parent element (${parentStrno}) not found in below_ring. Broken connectivity.`, 'WARNING', errors, warnings);
-                             }
-                        }
-
-                        // R18: High Occupancy (Capacity Check)
-                        if (tag === 'ODC' && children.length >= 129) {
-                             reportIssue('R18', strno, `High Occupancy on ODC (${children.length} children, max ~144)`, 'WARNING', errors, warnings);
-                        } else if (["FAT", "ODP"].includes(tag) && children.length >= 7) {
-                             reportIssue('R18', strno, `High Occupancy on ${tag} (${children.length} children, max ~8)`, 'WARNING', errors, warnings);
-                        }
-
-                        // R16: Anti-Split Check (Cascaded splitters)
-                        if (tag === 'SPL') {
-                             const splChildren = children.filter(c => elementTypes[c] === 'SPL');
-                             if (splChildren.length > 0) {
-                                 reportIssue('R16', strno, `Cascaded Splitter detected: SPL feeding into another SPL`, 'WARNING', errors, warnings);
-                             }
-                        }
-                    });
                 }
 
                 // ====================================
