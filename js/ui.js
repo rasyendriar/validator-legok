@@ -1,6 +1,141 @@
 import { appState, GameSystem } from './store.js';
 import { generateSVG, applyZoom } from './visualizer.js';
 
+// --- GLOBAL EVENT LISTENER: INLINE EDITING ---
+// Akan menangkap perubahan pada cell ber-atribut contenteditable="true"
+document.addEventListener('blur', function(evt) {
+    if (evt.target && evt.target.classList.contains('editable-cell')) {
+        const cell = evt.target;
+        const row = cell.closest('tr');
+        if (!row) return;
+
+        const uuid = row.getAttribute('data-uuid');
+        const colName = cell.getAttribute('data-col');
+        const newValue = cell.innerText.trim();
+
+        const fileNameEl = document.getElementById('modalFileName');
+        if (!fileNameEl) return;
+        
+        const fileName = fileNameEl.innerText;
+        const data = appState.processed[fileName];
+        if (!data || !uuid || !colName) return;
+
+        // 1. Cek dan Update di Display Data
+        if (data.displayData) {
+            const displayItem = data.displayData.find(r => r._uuid === uuid);
+            if (displayItem) {
+                displayItem[colName] = newValue;
+            }
+        }
+
+        // 2. Cek dan Update di Tenant Data (below_ring)
+        if (data.belowData) {
+            const belowItem = data.belowData.find(r => r._uuid === uuid);
+            if (belowItem) {
+                belowItem[colName] = newValue;
+                
+                // Update juga referensi di currentData & filteredData agar tampilan tetap sinkron
+                const lowerColName = colName.toLowerCase();
+                const currentItem = appState.currentData.find(r => r._uuid === uuid);
+                if (currentItem && currentItem[lowerColName] !== undefined) currentItem[lowerColName] = newValue;
+                
+                const filteredItem = appState.filteredData.find(r => r._uuid === uuid);
+                if (filteredItem && filteredItem[lowerColName] !== undefined) filteredItem[lowerColName] = newValue;
+            }
+        }
+    }
+}, true); // Gunakan mode capture untuk event blur
+
+// --- SORTABLE JS INITIALIZATION ---
+export function initTableSortable(fileName) {
+    if (typeof Sortable === 'undefined') return; // Bypass jika CDN gagal/belum diload
+
+    const data = appState.processed[fileName];
+    if (!data) return;
+
+    // 1. Sortable untuk Display Data Table
+    const displayTbody = document.getElementById('display-ring-body');
+    if (displayTbody && !displayTbody.sortableInstance) {
+        displayTbody.sortableInstance = new Sortable(displayTbody, {
+            handle: '.drag-handle',
+            animation: 150,
+            ghostClass: 'sortable-ghost',
+            onEnd: function (evt) {
+                const uuid = evt.item.getAttribute('data-uuid');
+                const activeData = appState.processed[document.getElementById('modalFileName').innerText];
+                
+                const oldIndex = activeData.displayData.findIndex(r => r._uuid === uuid);
+                if (oldIndex === -1) return;
+                
+                // Pindahkan elemen di array asli
+                const newIndex = evt.newIndex;
+                const [movedItem] = activeData.displayData.splice(oldIndex, 1);
+                activeData.displayData.splice(newIndex, 0, movedItem);
+                
+                showToast('Urutan Display Data berhasil diperbarui', 'success');
+            }
+        });
+    }
+
+    // 2. Sortable untuk Tenant Data Table (dengan Pagination/Filter)
+    const tenantTbody = document.getElementById('data-table-body');
+    if (tenantTbody && !tenantTbody.sortableInstance) {
+        tenantTbody.sortableInstance = new Sortable(tenantTbody, {
+            handle: '.drag-handle',
+            animation: 150,
+            ghostClass: 'sortable-ghost',
+            onEnd: function (evt) {
+                const uuid = evt.item.getAttribute('data-uuid');
+                const activeData = appState.processed[document.getElementById('modalFileName').innerText];
+                
+                // Dapatkan indeks asli relatif terhadap pagination halaman saat ini
+                const startIdx = (appState.currentPage - 1) * appState.rowsPerPage;
+                const viewOldIndex = startIdx + evt.oldIndex;
+                const viewNewIndex = startIdx + evt.newIndex;
+
+                // 1. Update array filteredData
+                const [movedFiltered] = appState.filteredData.splice(viewOldIndex, 1);
+                appState.filteredData.splice(viewNewIndex, 0, movedFiltered);
+
+                // 2. Update array asli (belowData)
+                const originalOldIndex = activeData.belowData.findIndex(r => r._uuid === uuid);
+                if (originalOldIndex === -1) return;
+                
+                const [movedOriginal] = activeData.belowData.splice(originalOldIndex, 1);
+
+                // Tentukan lokasi penyisipan akurat menggunakan sibling terdekat
+                const prevItemInView = appState.filteredData[viewNewIndex - 1];
+                if (!prevItemInView) {
+                    // Jika di drag ke paling atas
+                    const nextItemInView = appState.filteredData[viewNewIndex + 1];
+                    if (nextItemInView) {
+                        const nextOriginalIndex = activeData.belowData.findIndex(r => r._uuid === nextItemInView._uuid);
+                        activeData.belowData.splice(nextOriginalIndex, 0, movedOriginal);
+                    } else {
+                        activeData.belowData.unshift(movedOriginal);
+                    }
+                } else {
+                    // Masukkan tepat setelah item sebelumnya
+                    const prevOriginalIndex = activeData.belowData.findIndex(r => r._uuid === prevItemInView._uuid);
+                    activeData.belowData.splice(prevOriginalIndex + 1, 0, movedOriginal);
+                }
+
+                // 3. Resync currentData secara utuh agar indexing terjaga
+                appState.currentData = activeData.belowData.map(r => ({
+                    _uuid: r._uuid,
+                    strno: String(r.STRNO || ""),
+                    pltxt: String(r.PLTXT || ""),
+                    abckz: String(r.ABCKZ || ""),
+                    stort: String(r.STORT || ""), 
+                    arbpl: String(r.ARBPL || "")
+                }));
+
+                showToast('Urutan Tenant Data berhasil diperbarui', 'success');
+            }
+        });
+    }
+}
+
 // --- DARK MODE LOGIC ---
 export function toggleDarkMode() {
     const html = document.documentElement;
@@ -469,6 +604,10 @@ export function openVisualizer(fileName) {
     
     generateSVG(data.displayData, data.belowData, data.pid);
     renderDisplayRingTable(data.displayData);
+    
+    // Inisialisasi Sortable tiap kali visualizer dibuka/dirender awal
+    initTableSortable(fileName);
+
     updatePaginationInfo();
     const allIssues = [...data.errors, ...(data.warnings || [])];
     renderErrorTable(allIssues);
@@ -516,6 +655,12 @@ export function renderDisplayRingTable(displayData) {
         tr.innerHTML = rowHTML;
         tbody.appendChild(tr);
     });
+
+    // Re-bind sortable jika fileName tersedia
+    const currentFileName = document.getElementById('modalFileName')?.innerText;
+    if (currentFileName && appState.processed[currentFileName]) {
+        initTableSortable(currentFileName);
+    }
 }
 
 export function renderErrorTable(errors) {
@@ -667,4 +812,10 @@ export function renderTablePage() {
         `;
         tbody.appendChild(tr);
     });
+
+    // Re-bind sortable jika fileName tersedia (misal habis search/pindah halaman)
+    const currentFileName = document.getElementById('modalFileName')?.innerText;
+    if (currentFileName && appState.processed[currentFileName]) {
+        initTableSortable(currentFileName);
+    }
 }
