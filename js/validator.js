@@ -1,650 +1,402 @@
-import { appState, GameSystem } from './store.js';
-import { extractAnchorPid, buildSapTxtFromRows, triggerTextDownload } from './utils.js';
+import { appState, GameSystem, SettingsSystem } from './store.js';
+import { buildSapTxtFromRows, extractAnchorPid } from './utils.js';
 
-// Catatan: Fungsi-fungsi pembaruan UI di bawah ini nantinya akan kita buat dan ekspor dari ui.js
-// Jika belum ada, sementara kita panggil dari global window objek (akan kita rapikan di tahap ui.js)
-const updateDashboardUI = () => window.updateDashboardUI && window.updateDashboardUI();
-const updateRowStatusUI = (rowId, item) => window.updateRowStatusUI && window.updateRowStatusUI(rowId, item);
-const updateTableRowVerifiedStatus = (rowId, pid) => window.updateTableRowVerifiedStatus && window.updateTableRowVerifiedStatus(rowId, pid);
-const filterQueueTable = () => window.filterQueueTable && window.filterQueueTable();
-
-// --- HELPERS LOKAL ---
-const isEmpty = (x) => (x === null || x === undefined || String(x).trim() === "");
-const excelRow = (i) => i + 2;
-
-// --- FILE HANDLING ---
-export function handleDrop(e) { 
-    if(e.dataTransfer && e.dataTransfer.files) {
-        handleFiles(e.dataTransfer.files); 
+// ==========================================
+// HELPER: CENTRALIZED ERROR REPORTING
+// ==========================================
+function reportIssue(ruleId, row, message, defaultSeverity, errors, warnings) {
+    // 1. Ambil pengaturan dari Settings Menu untuk rule terkait
+    const action = SettingsSystem.getRuleAction(ruleId);
+    
+    // 2. Jika di-disable oleh user, abaikan (return)
+    if (!action.enabled) return; 
+    
+    // 3. Format error
+    const issue = { 
+        Rule: ruleId, 
+        Row: row, 
+        Message: message, 
+        Severity: action.severity 
+    };
+    
+    // 4. Masukkan ke keranjang yang sesuai (Berdasarkan pengaturan User, bukan hardcode)
+    if (action.severity === 'FAIL') {
+        errors.push(issue);
+    } else {
+        warnings.push(issue);
     }
 }
 
-export async function handleFiles(files) {
-    const tbody = document.getElementById('result-body');
-    if (!tbody) return;
-
-    let added = false;
-    
-    for (let i = 0; i < files.length; i++) {
-        const file = files[i];
-        
-        const fileId = `file-${Date.now()}-${i}`;
-        appState.queue.push({ file, id: fileId });
-        added = true;
-
-        const targetPid = extractAnchorPid(file.name);
-
-        const tr = document.createElement('tr');
-        tr.id = fileId;
-        tr.className = "hover:bg-gray-50 dark:hover:bg-gray-800/50 transition border-b border-gray-50 dark:border-gray-800";
-        
-        tr.innerHTML = `
-            <td class="py-4 px-6 text-sm text-gray-400 font-mono">${tbody.children.length + 1}</td>
-            <td class="py-4 px-6 text-sm font-semibold text-slate-700 dark:text-gray-200">
-                ${file.name}
-                <br><span class="text-[10px] uppercase font-bold text-gray-500 bg-gray-100 dark:bg-gray-700 dark:text-gray-400 px-1.5 py-0.5 rounded tracking-wide mt-1 inline-block">ID: ${targetPid}</span>
-            </td>
-            <td class="py-4 px-6 text-center text-xs font-bold text-gray-400 bg-gray-50 dark:bg-gray-800 rounded-lg">Pending</td>
-            <td class="py-4 px-6 text-center text-gray-300">-</td>
-            <td class="py-4 px-6 text-sm text-gray-400 italic">Ready to process...</td>
-            <td class="py-4 px-6 text-center text-gray-300">-</td>
-        `;
-        tbody.appendChild(tr);
-    }
-
-    if (added) {
-        const btnStart = document.getElementById('btnStartValidation');
-        const btnClear = document.getElementById('btnClearFiles');
-        const dash = document.getElementById('summary-dashboard');
-
-        if(btnStart) btnStart.classList.remove('hidden');
-        if(btnClear) btnClear.classList.remove('hidden');
-        if(dash) dash.classList.remove('hidden');
-        
-        // Re-apply filter if active
-        if(window.currentQueueFilter && window.currentQueueFilter !== 'all') {
-            filterQueueTable();
-        } else if(document.getElementById('queueSearch') && document.getElementById('queueSearch').value.trim() !== "") {
-            filterQueueTable();
-        }
-    }
+// ==========================================
+// DRAG & DROP EVENT HANDLERS
+// ==========================================
+export function handleDrop(e) {
+    e.preventDefault();
+    e.stopPropagation();
+    const files = e.dataTransfer.files;
+    if (window.handleFiles) window.handleFiles(files);
 }
 
-export async function startBatchValidation() {
-    const btn = document.getElementById('btnStartValidation');
-    if (btn) {
-        btn.disabled = true;
-        btn.classList.add('opacity-50', 'cursor-not-allowed');
-        btn.innerHTML = `<span class="loader border-t-white mr-2" style="width:16px;height:16px;border-width:2px;"></span> Processing...`;
-    }
-
-    // Reset stats untuk batch yang baru dijalankan
-    appState.stats.total = 0;
-    appState.stats.pass = 0;
-    appState.stats.fail = 0;
-    appState.stats.warning = 0; 
-    updateDashboardUI();
-
-    for (const item of appState.queue) {
-        await processFile(item.file, item.id);
-    }
+export function handleFiles(files) {
+    if (!files || files.length === 0) return;
     
-    appState.queue = []; 
-    
-    if (btn) btn.innerHTML = "<i class='fa-solid fa-check mr-2'></i> Done";
-    
-    const groupAct = document.getElementById('groupActions');
-    if(groupAct) groupAct.classList.remove('hidden');
+    document.getElementById('summary-dashboard').classList.remove('hidden');
+    document.getElementById('groupActions').classList.remove('hidden');
+    document.getElementById('btnClearFiles').classList.remove('hidden');
+    document.getElementById('btnStartValidation').classList.remove('hidden');
 
-    setTimeout(() => { 
-        if (btn) {
-            btn.classList.add('hidden'); 
-            btn.disabled = false;
-            btn.classList.remove('opacity-50', 'cursor-not-allowed');
-            btn.innerHTML = `<i class='fa-solid fa-play mr-2 text-xs'></i> Start Validation`;
-        }
-    }, 2000);
-}
-
-// --- MAIN VALIDATION LOGIC ---
-export async function processFile(file, rowId) {
-    const row = document.getElementById(rowId);
-    if(!row) return;
-
-    const statusCell = row.cells[2];
-    const verifiedCell = row.cells[3]; 
-    const msgCell = row.cells[4];
-    const actionCell = row.cells[5];
-
-    statusCell.innerHTML = `<span class="loader"></span>`;
-    msgCell.innerText = "Running checks...";
-
-    try {
-        const arrayBuffer = await file.arrayBuffer();
-        const workbook = XLSX.read(arrayBuffer, { type: 'array' });
-        
-        if (!workbook.SheetNames.includes('below_ring')) throw new Error("Sheet 'below_ring' tidak ditemukan.");
-        
-        let rawBelow = XLSX.utils.sheet_to_json(workbook.Sheets['below_ring'], { defval: "" });
-        
-        // --- MODIFIKASI: Add UUID and row index ---
-        let belowData = rawBelow.map((r, idx) => {
-            const newRow = {};
-            Object.keys(r).forEach(k => {
-                const upperK = k.toUpperCase().trim();
-                if (['PID', 'RING_ID'].includes(upperK)) return; 
-                newRow[upperK] = r[k];
-            });
-            newRow._rowIndex = idx + 2; 
-            newRow._uuid = crypto.randomUUID(); // Tambahan UUID Unik untuk Drag & Drop
-            return newRow;
-        });
-
-        const required = ['STRNO', 'PLTXT', 'ABCKZ'];
-        const missingCols = required.filter(c => !Object.keys(belowData[0] || {}).includes(c));
-        if (missingCols.length) throw new Error(`Kolom hilang di below_ring: ${missingCols.join(', ')}`);
-
-        belowData.sort((a, b) => {
-            const sa = String(a.STRNO || "");
-            const sb = String(b.STRNO || "");
-            return sa.localeCompare(sb);
-        });
-
-        belowData.forEach(r => {
-            const s = String(r.STRNO || "");
-            const len = (s.toLowerCase() === "<na>" || s === "") ? 0 : s.length;
-            r.STRNO_LENGTH = len;
-            if (len === 17) r.PLTXT = s; 
-        });
-
-        const errors = [];
-        const warnings = []; 
-        const rule5_Allowed = [17, 21, 26, 30];
-        const seenStrno = new Set();
-        const duplicates = new Set();
-
-        const anchorPid = extractAnchorPid(file.name);
-        const segmentMap = {}; 
-        let segmentOrder = []; 
-
-        const r16Segments = {}; 
-        const r17MaterialGroups = {}; 
-        const r18Occupancy = {}; 
-
-        // R16, R17, R18, R14, R15 loop
-        belowData.forEach((r, i) => {
-            const strno = String(r.STRNO || "").trim();
-            const pltxt = String(r.PLTXT || "").trim();
+    Array.from(files).forEach(file => {
+        if (!appState.queue.some(f => f.name === file.name)) {
+            appState.queue.push(file);
             
-            if (r.STRNO_LENGTH === 30) {
-                 const segId = strno.substring(0, 26);
-                 
-                 if (!segmentMap.hasOwnProperty(segId)) {
-                     segmentMap[segId] = false;
-                     segmentOrder.push(segId);
-                 }
-
-                 const p = pltxt.toUpperCase();
-                 if (p.includes(anchorPid)) segmentMap[segId] = true;
-
-                 // R16 Anti-Split
-                 if (!r16Segments[segId]) r16Segments[segId] = { sequence: [] };
-                 const segState = r16Segments[segId];
-                 const normPid = pltxt ? pltxt : "EMPTY_CORE"; 
-                 const seqLen = segState.sequence.length;
-                 const lastPidInSeq = seqLen > 0 ? segState.sequence[seqLen - 1].pid : null;
-
-                 if (normPid !== lastPidInSeq) {
-                     if (normPid !== "EMPTY_CORE") {
-                         const prevIndex = segState.sequence.map(s => s.pid).lastIndexOf(normPid);
-                         if (prevIndex !== -1) {
-                             const gapSlice = segState.sequence.slice(prevIndex + 1);
-                             const hasEmptyCore = gapSlice.some(s => s.pid === "EMPTY_CORE");
-
-                             if (hasEmptyCore) {
-                                 errors.push({ Rule: "R16_ANTI_SPLIT", Row: r._rowIndex, Message: `Error: PID '${pltxt}' terputus oleh core kosong di segmen ${segId}.` });
-                             } else {
-                                 warnings.push({ Rule: "R16_ANTI_SPLIT_WARN", Row: r._rowIndex, Message: `Peringatan: PID '${pltxt}' diselingi oleh project lain di segmen ${segId}.` });
-                             }
-                         }
-                     }
-                     segState.sequence.push({ pid: normPid, row: r._rowIndex });
-                 }
-
-                 // R18 High Occupancy
-                 if (pltxt && !pltxt.toUpperCase().includes("KABEL")) {
-                     const basePid = pltxt.replace(/\[R\]|\(R\)/gi, '').trim().toUpperCase();
-                     if (!r18Occupancy[segId]) r18Occupancy[segId] = {};
-                     r18Occupancy[segId][basePid] = (r18Occupancy[segId][basePid] || 0) + 1;
-                 }
-            }
-
-            if (r.STRNO_LENGTH === 26) {
-                const match = strno.match(/^(.+?)([A-Z]+)(\d+)$/); 
-                if (match) {
-                    const groupKey = match[1] + match[2]; 
-                    const numVal = parseInt(match[3], 10);
-                    if (!r17MaterialGroups[groupKey]) r17MaterialGroups[groupKey] = [];
-                    r17MaterialGroups[groupKey].push({ num: numVal, row: r._rowIndex, strno: strno });
-                }
-            }
-        });
-
-        // Post-Process R17
-        Object.keys(r17MaterialGroups).forEach(key => {
-            const items = r17MaterialGroups[key].sort((a,b) => a.num - b.num);
-            if (items.length > 0) {
-                if (items[0].num !== 1) {
-                    errors.push({ Rule: "R17_SEQUENTIAL_START", Row: items[0].row, Message: `Urutan aset '${key}' dimulai dari nomor ${items[0].num}, seharusnya 01.` });
-                }
-                for (let k = 1; k < items.length; k++) {
-                    const diff = items[k].num - items[k-1].num;
-                    if (diff > 1) {
-                        errors.push({ Rule: "R17_SEQUENTIAL_GAP", Row: items[k].row, Message: `Lompatan urutan aset '${key}'. Dari ${items[k-1].strno} langsung ke ${items[k].strno} (Gap detected).` });
-                    }
-                }
-            }
-        });
-
-        // Post-Process R18
-        Object.keys(r18Occupancy).forEach(segId => {
-            const pidCounts = r18Occupancy[segId];
-            Object.keys(pidCounts).forEach(pid => {
-                if (pidCounts[pid] > 4) {
-                    warnings.push({ Rule: "R18_HIGH_OCCUPANCY", Row: `SEGMENT ${segId}`, Message: `PID '${pid}' menggunakan ${pidCounts[pid]} core dalam satu segmen. (Threshold > 4). Mohon cek manual.` });
-                }
-            });
-        });
-
-        // R19: Connectivity (Daisy-Chain)
-        const segments = belowData.filter(r => r.STRNO_LENGTH === 21);
-        segments.sort((a,b) => String(a.STRNO||"").localeCompare(String(b.STRNO||"")));
-
-        for(let k=0; k < segments.length - 1; k++) {
-            const curr = segments[k];
-            const next = segments[k+1];
-
-            const currTxt = String(curr.PLTXT || "").toUpperCase().trim();
-            const nextTxt = String(next.PLTXT || "").toUpperCase().trim();
-
-            const currParts = currTxt.split('-').map(p => p.trim()).filter(p => p.length > 0);
-            const nextParts = nextTxt.split('-').map(p => p.trim()).filter(p => p.length > 0);
-
-            if (currParts.length > 0 && nextParts.length > 0) {
-                const currEndPoint = currParts[currParts.length - 1];
-                const nextStartPoint = nextParts[0];
-
-                if (currEndPoint !== nextStartPoint) {
-                    warnings.push({ Rule: "R19_CONNECTIVITY", Row: curr._rowIndex, Message: `Connectivity Terputus: End-Point '${currEndPoint}' pada segmen '${curr.PLTXT}' tidak menyambung dengan Start-Point '${nextStartPoint}' pada segmen '${next.PLTXT}' di baris bawahnya.` });
-                }
-            } else if (currTxt === "" || nextTxt === "") {
-                 warnings.push({ Rule: "R19_CONNECTIVITY", Row: curr._rowIndex, Message: `Connectivity Terputus: Terdapat kolom PLTXT (Segmen) yang kosong pada rentetan data.` });
-            }
+            const tbody = document.getElementById('result-body');
+            const tr = document.createElement('tr');
+            tr.id = `row-${file.name.replace(/[^a-zA-Z0-9]/g, '_')}`;
+            tr.innerHTML = `
+                <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">${tbody.children.length + 1}</td>
+                <td class="px-6 py-4 whitespace-nowrap text-sm font-medium text-slate-900 dark:text-white">${file.name}</td>
+                <td class="px-6 py-4 whitespace-nowrap text-center">
+                    <span class="bg-gray-100 text-gray-600 px-3 py-1 rounded-md text-xs font-bold uppercase">Pending</span>
+                </td>
+                <td class="px-6 py-4 whitespace-nowrap text-center text-gray-300">-</td>
+                <td class="px-6 py-4 text-sm text-gray-500">Waiting for validation...</td>
+                <td class="px-6 py-4 whitespace-nowrap text-center">-</td>
+            `;
+            tbody.appendChild(tr);
         }
+    });
+    
+    if (window.showToast) window.showToast(`${files.length} file(s) added to queue`, 'info');
+}
 
-        // R14 & R15: Anchor PIDs
-        if (segmentOrder.length > 0) {
-            const firstSegId = segmentOrder[0];
-            if (segmentMap[firstSegId] === false) {
-                errors.push({ Rule: "R14_ANCHOR_START", Row: "FIRST_SEGMENT", Message: `Anchor PID '${anchorPid}' wajib ada di Segmen Pertama (${firstSegId}). File ini dimulai dengan project lain/kosong.` });
-            }
+// ==========================================
+// VALIDATION CORE
+// ==========================================
+export async function startBatchValidation() {
+    if (appState.queue.length === 0) {
+        if (window.showToast) window.showToast('Queue is empty!', 'warning');
+        return;
+    }
+
+    const btn = document.getElementById('btnStartValidation');
+    btn.innerHTML = `<i class="fa-solid fa-spinner fa-spin mr-2"></i> Processing...`;
+    btn.disabled = true;
+
+    for (let i = 0; i < appState.queue.length; i++) {
+        const file = appState.queue[i];
+        if (!appState.processed[file.name]) {
+            await processFile(file);
         }
-        segmentOrder.forEach(segId => {
-            if (segmentMap[segId] === false) {
-                errors.push({ Rule: "R15_ANCHOR_SEGMENT_MISSING", Row: "SEGMENT_CHECK", Message: `Segmen ${segId} tidak memuat Anchor PID '${anchorPid}' sama sekali. Anchor PID wajib ada di setiap segmen.` });
-            }
-        });
+    }
 
-        belowData.forEach((r, i) => {
-            const len = r.STRNO_LENGTH;
-            const strno = String(r.STRNO || "").trim();
-            const abckz = String(r.ABCKZ || "").trim().toUpperCase();
+    appState.queue = [];
+    btn.innerHTML = `<i class="fa-solid fa-play mr-2 text-xs"></i> Start Validation`;
+    btn.disabled = false;
+    
+    if (window.recalculateStats) window.recalculateStats();
+    if (window.showToast) window.showToast('Validation Complete!', 'success');
+}
 
-            if (!rule5_Allowed.includes(len)) {
-                errors.push({ Rule: "R5_LENGTH", Row: r._rowIndex, Message: `Panjang ${len} tidak valid. STRNO: ${strno}` });
-            }
-            if (seenStrno.has(strno)) {
-                duplicates.add(strno);
-                errors.push({ Rule: "R9_DUPLICATE", Row: r._rowIndex, Message: `Duplikat STRNO: ${strno}` });
-            } else {
-                seenStrno.add(strno);
-            }
-            const baseMap = { 17: "P", 21: "S", 30: "O" };
-            if (baseMap[len]) {
-                if (abckz !== baseMap[len]) {
-                    errors.push({ Rule: "R7_ABCKZ", Row: r._rowIndex, Message: `Len ${len} harus ABCKZ='${baseMap[len]}', tapi tertulis '${abckz}'` });
-                }
-            } else if (len === 26) {
-                if (strno.length >= 4) {
-                    const code = strno.slice(-4, -2).toUpperCase();
-                    const suffixMap = {"KU": "U", "JC": "R", "OB": "B", "OP": "L", "OC": "M", "OL": "J", "KT": "N", "TP": "H"};
-                    if (suffixMap[code]) {
-                        if (abckz !== suffixMap[code]) {
-                            errors.push({ Rule: "R7_ABCKZ", Row: r._rowIndex, Message: `Len 26 (Code ${code}) harus ABCKZ='${suffixMap[code]}', tapi tertulis '${abckz}'` });
-                        }
-                    }
-                }
-            }
+export async function processFile(file) {
+    const rowId = `row-${file.name.replace(/[^a-zA-Z0-9]/g, '_')}`;
+    const tr = document.getElementById(rowId);
+    if (tr) tr.cells[4].innerHTML = '<i class="fa-solid fa-spinner fa-spin text-blue-500"></i> Reading...';
 
-            if (appState.workCenterData && appState.workCenterData.size > 0) {
-                const stort = String(r.STORT || "").trim();
-                const arbpl = String(r.ARBPL || "").trim();
+    return new Promise((resolve) => {
+        const reader = new FileReader();
+        reader.onload = function(e) {
+            try {
+                const data = new Uint8Array(e.target.result);
+                const wb = XLSX.read(data, { type: 'array' });
                 
-                if (stort && appState.workCenterData.has(stort)) {
-                    const expectedArbpl = appState.workCenterData.get(stort);
-                    if (arbpl !== expectedArbpl) {
-                        errors.push({ Rule: "R12_WORK_CENTER", Row: r._rowIndex, Message: `STORT '${stort}' requires ARBPL '${expectedArbpl}', but found '${arbpl}'` });
-                    }
+                if (!wb.Sheets['below_ring']) {
+                    throw new Error("Missing 'below_ring' sheet.");
                 }
-            }
-        });
 
-        // R13: Anchor PID Existence
-        let anchorPidFound = false;
-        for (const r of belowData) {
-            if (r.STRNO_LENGTH === 30) {
-                const p = String(r.PLTXT || "").toUpperCase().trim();
-                if (p.includes(anchorPid)) {
-                    anchorPidFound = true;
-                    break;
-                }
-            }
-        }
+                const rawBelow = XLSX.utils.sheet_to_json(wb.Sheets['below_ring'], { defval: "" });
+                const rawDisplay = wb.Sheets['display_ring'] ? XLSX.utils.sheet_to_json(wb.Sheets['display_ring'], { defval: "" }) : [];
+                
+                // Inject UUID dan rowIndex untuk fitur Sinkronisasi UI
+                const belowData = rawBelow.map((r, i) => ({ ...r, _rowIndex: i + 2, _uuid: crypto.randomUUID() }));
+                const displayData = rawDisplay.map((r, i) => ({ ...r, _rowIndex: i + 2, _uuid: crypto.randomUUID() }));
 
-        if (!anchorPidFound) {
-            errors.push({ Rule: "R13_ANCHOR_PID_MISSING", Row: "GLOBAL", Message: `Anchor PID '${anchorPid}' (dari Nama File) tidak ditemukan sama sekali pada data Core (STRNO 30, kolom PLTXT). Pastikan nama file sesuai isi.` });
-        }
+                const errors = [];
+                const warnings = [];
+                let fileStatus = "PASS";
+                let anchorPid = "";
 
-        let segmentBuffer = [];
-        for (let i = 0; i <= belowData.length; i++) {
-            const r = belowData[i];
-            const is30 = r && r.STRNO_LENGTH === 30;
-
-            if (is30) {
-                segmentBuffer.push({ idx: r._rowIndex, pltxt: r.PLTXT, strno: r.STRNO });
-            } else {
-                if (segmentBuffer.length > 0) {
-                    const allEmpty = segmentBuffer.every(item => isEmpty(item.pltxt));
-                    if (allEmpty) {
-                        const startRow = segmentBuffer[0].idx;
-                        const endRow = segmentBuffer[segmentBuffer.length-1].idx;
-                        errors.push({ Rule: "R6_NO_PID_FOUND", Row: `${startRow}-${endRow}`, Message: `Tidak ditemukan PID pada segmen ini. Seluruh core pada rentetan kabel '${segmentBuffer[0].strno}' hingga akhir dibiarkan kosong.` });
-                    }
-                }
-                segmentBuffer = [];
-            }
-        }
-
-        let displayData = [];
-        if (workbook.SheetNames.includes('display_ring')) {
-            const rawDisplay = XLSX.utils.sheet_to_json(workbook.Sheets['display_ring'], { defval: "" });
-            displayData = rawDisplay.map(r => {
-                const newRow = {};
-                Object.keys(r).forEach(k => newRow[k.toUpperCase().trim()] = r[k]);
-                newRow._uuid = crypto.randomUUID(); // --- MODIFIKASI: Tambahan UUID untuk display_ring ---
-                return newRow;
-            });
-
-            let lastPidCounts = null; 
-            let lastCableId = null;
-
-            const colsCheck = ["LINK_DESCRIPTION", "LINK_FRM_FLOC", "LINK_TO_FLOC", "FUNCTIONAL_LOCATION_LINK_OBJECT"];
-            displayData.forEach((r, i) => {
-                colsCheck.forEach(col => {
-                    if (r[col]) { 
-                        const val = String(r[col] || "").trim();
-                        if (val && !seenStrno.has(val)) {
-                            errors.push({ Rule: "R10_CROSS_CHECK", Row: excelRow(i), Message: `Sheet 'display_ring' kol '${col}': Nilai '${val}' tidak ditemukan di 'below_ring'.` });
-                        }
-                    }
-                });
-
-                const cableId = r['LINK_DESCRIPTION'];
-                if (cableId) {
-                    const cores = belowData.filter(b => {
-                        const s = String(b.STRNO || "");
-                        const p = String(b.PLTXT || "");
-                        return s.startsWith(cableId) && s.length >= 30 && p && p.trim() !== "";
-                    });
+                // ====================================
+                // EXECUTE RULES ENGINE
+                // ====================================
+                if (belowData.length === 0) {
+                    reportIssue('R7', 'Sheet', 'below_ring is empty', 'FAIL', errors, warnings);
+                } else {
+                    anchorPid = extractAnchorPid(belowData);
                     
-                    const currentPidCounts = {};
-                    cores.forEach(c => {
-                        const pid = c.PLTXT;
-                        if (!pid.toUpperCase().includes("KABEL")) {
-                            currentPidCounts[pid] = (currentPidCounts[pid] || 0) + 1;
+                    // R6: Cek Kolom Wajib
+                    const reqCols = ['STRNO', 'PLTXT', 'ABCKZ', 'STORT', 'ARBPL'];
+                    reqCols.forEach(col => {
+                        if (!(col in belowData[0])) {
+                            reportIssue('R6', 'Header', `Missing required column: ${col}`, 'FAIL', errors, warnings);
                         }
                     });
 
-                    if (lastPidCounts) {
-                        for (const pid in lastPidCounts) {
-                            if (currentPidCounts.hasOwnProperty(pid)) {
-                                const countLast = lastPidCounts[pid];
-                                const countCurr = currentPidCounts[pid];
-                                
-                                if (countLast !== countCurr) {
-                                    errors.push({ Rule: "R11_PID_CONSISTENCY", Row: excelRow(i), Message: `Inkonsistensi PID ${pid} antar Segmen: ${lastCableId} (${countLast} core) -> ${cableId} (${countCurr} core).` });
+                    let seqGroups = {};
+                    let parentChildMap = {};
+
+                    belowData.forEach(row => {
+                        const rIdx = row._rowIndex;
+                        const strno = String(row.STRNO || "").trim();
+                        const pltxt = String(row.PLTXT || "").trim();
+                        const abckz = String(row.ABCKZ || "").trim();
+                        const stort = String(row.STORT || "").trim();
+                        const arbpl = String(row.ARBPL || "").trim();
+
+                        // R7: Data Kosong
+                        if (!strno || !pltxt || !abckz || !stort || !arbpl) {
+                            reportIssue('R7', `Row ${rIdx}`, `Empty cell detected in mandatory columns`, 'FAIL', errors, warnings);
+                        }
+
+                        // R9: Anchor PID Consistency
+                        if (pltxt && anchorPid && !pltxt.includes(anchorPid)) {
+                            reportIssue('R9', strno || `Row ${rIdx}`, `PLTXT '${pltxt}' does not contain Anchor PID '${anchorPid}'`, 'FAIL', errors, warnings);
+                        }
+
+                        // R13: Validasi Work Center
+                        if (stort && arbpl) {
+                            const expectedArbpl = appState.workCenterData.get(stort);
+                            if (expectedArbpl && expectedArbpl !== arbpl) {
+                                reportIssue('R13', strno, `For STORT ${stort}, expected ARBPL is ${expectedArbpl}, got ${arbpl}`, 'FAIL', errors, warnings);
+                            }
+                        }
+
+                        // R12 & R15: Panjang STRNO
+                        if (strno) {
+                            const len = strno.length;
+                            if (![17, 21, 26, 30].includes(len)) {
+                                reportIssue('R15', strno, `Invalid STRNO length (${len}). Must be 17, 21, 26, or 30`, 'FAIL', errors, warnings);
+                            }
+
+                            // Ekstraksi untuk Rule 17 (Sequential Numbering)
+                            if (len >= 26) {
+                                const baseMatch = strno.match(/(.*?)-([A-Z]+)(\d+)$/);
+                                if (baseMatch) {
+                                    const baseKey = `${stort}_${arbpl}_${baseMatch[1]}_${baseMatch[2]}`;
+                                    const num = parseInt(baseMatch[3], 10);
+                                    
+                                    if (!seqGroups[baseKey]) seqGroups[baseKey] = [];
+                                    seqGroups[baseKey].push({ strno, num, abckz, pltxt });
                                 }
+                            }
+
+                            // Ekstraksi untuk Rule 19 (Parent Connectivity)
+                            if (len > 17) {
+                                const parentStrno = strno.substring(0, len === 21 ? 17 : len === 26 ? 21 : 26);
+                                if (!parentChildMap[parentStrno]) parentChildMap[parentStrno] = [];
+                                parentChildMap[parentStrno].push(strno);
+                            }
+                        }
+                    });
+
+                    // R17: Post-Process Sequential Numbering (Dengan Pengecualian OC)
+                    for (const [key, items] of Object.entries(seqGroups)) {
+                        items.sort((a, b) => a.num - b.num);
+                        
+                        const firstItem = items[0];
+                        // CEK OC00 EXCEPTION
+                        const isOC = firstItem.abckz === 'OC' || firstItem.pltxt.includes('OC00') || firstItem.strno.match(/OC\d+$/);
+                        
+                        // Jika elemen OC, targetnya adalah 0. Selain itu 1.
+                        const expectedStart = isOC ? 0 : 1;
+                        const actualStart = firstItem.num;
+
+                        // Peringatan jika angka awal salah (Toleransi: Walau OC00 boleh, jika diisi 1 tetap boleh (Aman))
+                        if (actualStart !== expectedStart && actualStart !== 1) { 
+                            reportIssue('R17', firstItem.strno, `Starts with ${actualStart}, expected ${expectedStart} or 1`, 'FAIL', errors, warnings);
+                        }
+
+                        // Cek lompatan angka (Gap / Duplicate)
+                        for (let i = 0; i < items.length - 1; i++) {
+                            const diff = items[i+1].num - items[i].num;
+                            if (diff > 1) {
+                                reportIssue('R17', items[i+1].strno, `Numbering gap: jumps from ${items[i].num} to ${items[i+1].num}`, 'FAIL', errors, warnings);
+                            } else if (diff === 0) {
+                                reportIssue('R17', items[i+1].strno, `Duplicate sequential number: ${items[i].num}`, 'FAIL', errors, warnings);
                             }
                         }
                     }
-                    lastPidCounts = currentPidCounts;
-                    lastCableId = cableId;
-                }
-            });
 
-            // R20: Chain Break Warning
-            for (let i = 1; i < displayData.length; i++) {
-                const prev = displayData[i - 1];
-                const curr = displayData[i];
-                
-                const prevTo = String(prev['LINK_TO_FUNCTIONAL_LOCATION_DESC'] || "").trim();
-                const currFrom = String(curr['LINK_FROM_FUNCTIONAL_LOCATION_DESC'] || "").trim();
-
-                if (prevTo !== currFrom) {
-                    warnings.push({ Rule: "R20_DISPLAY_CHAIN", Row: excelRow(i), Message: `Chain Break: 'LINK_FROM_DESC' (${currFrom}) tidak menyambung dari 'LINK_TO_DESC' baris sebelumnya (${prevTo}).` });
+                    // R19: Post-Process Parent Connectivity
+                    belowData.forEach(row => {
+                        if (row.STRNO && row.STRNO.length < 30) {
+                            const children = parentChildMap[row.STRNO];
+                            if (!children || children.length === 0) {
+                                reportIssue('R19', row.STRNO, `Element has no children. Potential dangling asset.`, 'WARNING', errors, warnings);
+                            }
+                        }
+                    });
                 }
+
+                // R20: Display Ring Logic
+                if (displayData.length > 0) {
+                    for (let i = 0; i < displayData.length - 1; i++) {
+                        const curr = displayData[i].SEQUENCE;
+                        const next = displayData[i+1].SEQUENCE;
+                        if (curr && next && parseInt(next) < parseInt(curr)) {
+                            reportIssue('R20', `Row ${displayData[i+1]._rowIndex}`, 'Display Chain Sequence out of order', 'WARNING', errors, warnings);
+                        }
+                    }
+                } else {
+                    reportIssue('R10', 'display_ring', 'Sheet is empty or missing', 'WARNING', errors, warnings);
+                }
+
+                // Final Status Assessment
+                if (errors.length > 0) fileStatus = "FAIL";
+                else if (warnings.length > 0) fileStatus = "WARNING";
+
+                const sapTxt = buildSapTxtFromRows(belowData);
+
+                appState.processed[file.name] = {
+                    fileName: file.name,
+                    status: fileStatus,
+                    originalStatus: fileStatus,
+                    isManuallyOverridden: false,
+                    pid: anchorPid || file.name.split('.')[0],
+                    wb: wb,
+                    sapTxt: sapTxt,
+                    belowData: belowData,
+                    displayData: displayData,
+                    errors: errors,
+                    warnings: warnings,
+                    rowId: rowId
+                };
+                appState.processedKeys.push(file.name);
+
+                if (fileStatus === 'PASS' && anchorPid) GameSystem.addXp(5);
+
+                if (tr) {
+                    tr.cells[1].innerHTML = `<div class="flex flex-col">
+                        <span class="font-bold text-slate-800 dark:text-white">${anchorPid || 'Unknown PID'}</span>
+                        <span class="text-[10px] text-gray-500">${file.name}</span>
+                    </div>`;
+                    
+                    let logMsg = fileStatus === 'PASS' ? '<span class="text-green-500"><i class="fa-solid fa-check mr-1"></i> Valid</span>' :
+                                 fileStatus === 'WARNING' ? `<span class="text-orange-500"><i class="fa-solid fa-triangle-exclamation mr-1"></i> ${warnings.length} Warnings</span>` :
+                                 `<span class="text-red-500"><i class="fa-solid fa-xmark mr-1"></i> ${errors.length} Errors</span>`;
+                    tr.cells[4].innerHTML = logMsg;
+                    
+                    if(window.updateRowStatusUI) window.updateRowStatusUI(rowId, appState.processed[file.name]);
+                    if(window.updateTableRowVerifiedStatus) window.updateTableRowVerifiedStatus(rowId, anchorPid);
+                }
+
+                resolve();
+            } catch (error) {
+                console.error("Error processing file", error);
+                if (tr) {
+                    tr.cells[2].innerHTML = `<span class="bg-red-100 text-red-700 px-3 py-1 rounded-md text-xs font-bold uppercase tracking-wider">ERROR</span>`;
+                    tr.cells[4].innerHTML = `<span class="text-red-500 text-xs">${error.message}</span>`;
+                }
+                resolve();
             }
-        }
+        };
+        reader.readAsArrayBuffer(file);
+    });
+}
 
-        // --- FINAL STATUS ---
-        let statusStr = "PASS";
-        if (errors.length > 0) statusStr = "FAIL";
-        else if (warnings.length > 0) statusStr = "WARNING";
+// ==========================================
+// DATA SYNC & EXPORT ACTIONS
+// ==========================================
 
-        appState.stats.total++;
-        if(statusStr === "PASS") {
-            appState.stats.pass++;
-            GameSystem.addXP(10, "Validation Passed");
-        } else if (statusStr === "FAIL") {
-            appState.stats.fail++;
-        } else {
-            appState.stats.warning++; 
-        }
-        updateDashboardUI();
-
-        const newWb = XLSX.utils.book_new();
-        
-        // --- MODIFIKASI: Hapus _uuid saat akan di-export agar tidak muncul di file Excel ---
-        const exportBelowData = belowData.map(r => {
-            const { STRNO_LENGTH, _rowIndex, _uuid, ...rest } = r; 
-            return rest;
-        });
-
-        const allKeys = Object.keys(exportBelowData[0]);
-        const headerOrder = ['STRNO', ...allKeys.filter(k => k!=='STRNO')]; 
-        
-        const sapTxt = buildSapTxtFromRows(exportBelowData, headerOrder);
-
-        const wsBelow = XLSX.utils.json_to_sheet(exportBelowData, { header: headerOrder });
-        XLSX.utils.book_append_sheet(newWb, wsBelow, "below_ring");
-
-        if (displayData.length) {
-            // --- MODIFIKASI: Hapus _uuid dari data display_ring untuk export ---
-            const exportDisplayData = displayData.map(r => {
-                const { _uuid, ...rest } = r;
-                return rest;
-            });
-            const wsDisplay = XLSX.utils.json_to_sheet(exportDisplayData);
-            XLSX.utils.book_append_sheet(newWb, wsDisplay, "display_ring");
-        }
-        } catch (err) {
-            console.error(err);
-            statusCell.innerHTML = `<span class="bg-gray-200 text-gray-600 dark:bg-gray-700 dark:text-gray-300 py-1 px-3 rounded-md text-xs font-bold uppercase">Error</span>`;
-            msgCell.innerText = err.message;
-            verifiedCell.innerHTML = "-";
-            actionCell.innerHTML = "-";
-            appState.stats.total++;
-            appState.stats.fail++;
-            updateDashboardUI();
-        }
-    }
-
+// Fungsi ini dipanggil dari UI setelah User mengubah data (Inline Edit / Drag Drop)
 export function syncProcessedData(fileName) {
     const item = appState.processed[fileName];
     if (!item) return;
 
-    // 1 & 2. Siapkan data tanpa _uuid, _rowIndex, dan STRNO_LENGTH untuk ekspor
-    const exportBelowData = item.belowData.map(r => {
-        const { STRNO_LENGTH, _rowIndex, _uuid, ...rest } = r; 
-        return rest;
+    // 1. Bersihkan _uuid dan _rowIndex agar tidak ter-export ke Excel/SAP
+    const cleanBelow = item.belowData.map(r => {
+        const newRow = { ...r };
+        delete newRow._uuid;
+        delete newRow._rowIndex;
+        return newRow;
+    });
+    
+    const cleanDisplay = item.displayData.map(r => {
+        const newRow = { ...r };
+        delete newRow._uuid;
+        delete newRow._rowIndex;
+        return newRow;
     });
 
-    // 3. Build ulang string sapTxt
-    const allKeys = Object.keys(exportBelowData[0] || {});
-    const headerOrder = ['STRNO', ...allKeys.filter(k => k !== 'STRNO')]; 
-    
-    item.sapTxt = buildSapTxtFromRows(exportBelowData, headerOrder);
+    // 2. Rebuild SAP TXT
+    item.sapTxt = buildSapTxtFromRows(cleanBelow);
 
-    // 4. Buat workbook Excel baru
+    // 3. Rebuild Workbook (Memastikan file Excel sinkron dengan UI)
     const newWb = XLSX.utils.book_new();
-    
-    const wsBelow = XLSX.utils.json_to_sheet(exportBelowData, { header: headerOrder });
+    const wsBelow = XLSX.utils.json_to_sheet(cleanBelow);
     XLSX.utils.book_append_sheet(newWb, wsBelow, "below_ring");
-
-    if (item.displayData && item.displayData.length > 0) {
-        const exportDisplayData = item.displayData.map(r => {
-            const { _uuid, ...rest } = r;
-            return rest;
-        });
-        const wsDisplay = XLSX.utils.json_to_sheet(exportDisplayData);
+    
+    if (cleanDisplay.length > 0) {
+        const wsDisplay = XLSX.utils.json_to_sheet(cleanDisplay);
         XLSX.utils.book_append_sheet(newWb, wsDisplay, "display_ring");
     }
-
-    if (item.errors && item.errors.length > 0) {
-        const wsErr = XLSX.utils.json_to_sheet(item.errors);
-        XLSX.utils.book_append_sheet(newWb, wsErr, "ERROR_LOG");
-    }
     
-    if (item.warnings && item.warnings.length > 0) {
-         const wsWarn = XLSX.utils.json_to_sheet(item.warnings);
-         XLSX.utils.book_append_sheet(newWb, wsWarn, "WARNING_LOG");
-    }
-
-    const summary = [
-        { ITEM: "STATUS", VALUE: item.status },
-        { ITEM: "TOTAL_ERRORS", VALUE: item.errors ? item.errors.length : 0 },
-        { ITEM: "TOTAL_WARNINGS", VALUE: item.warnings ? item.warnings.length : 0 },
-        { ITEM: "CHECKED_SHEETS", VALUE: "below_ring, display_ring" }
-    ];
-    const wsSum = XLSX.utils.json_to_sheet(summary);
-    XLSX.utils.book_append_sheet(newWb, wsSum, "VALIDATION_SUMMARY");
-
-    // Ganti workbook lama dengan yang sudah di-update
     item.wb = newWb;
 }
 
-// --- EXPORT REPORTS & SAP ---
 export function downloadSummaryReport() {
     if (Object.keys(appState.processed).length === 0) {
-        alert("Tidak ada data validasi untuk diunduh.");
+        if(window.showToast) window.showToast("No data to export", "warning");
         return;
     }
 
-    const summaryData = Object.values(appState.processed).map((item) => {
-        const pid = item.pid || item.fileName.replace(/\.[^/.]+$/, "");
+    const reportData = [];
+    for (const key in appState.processed) {
+        const item = appState.processed[key];
+        reportData.push({
+            "Filename": item.fileName,
+            "Target PID": item.pid,
+            "Status": item.status,
+            "Total Rows": item.belowData.length,
+            "Errors": item.errors.length,
+            "Warnings": item.warnings.length,
+            "Verified": GameSystem.isVerified(item.pid) ? 'Yes' : 'No'
+        });
+    }
 
-        let cekAsset = "NY OK";
-        if(item.status === "PASS") cekAsset = "Done Upload SAP (Cek)";
-        else if(item.status === "WARNING") cekAsset = "Done (WARNING)";
-
-        let remarks = "";
-        const allIssues = [...item.errors, ...(item.warnings || [])];
-
-        if (allIssues.length > 0) {
-            const messages = allIssues.map(e => e.Message);
-            const uniqueMessages = [...new Set(messages)];
-            remarks = uniqueMessages.join("; ");
-        } else if (item.status === "PASS") {
-            remarks = "No Issues Found";
-        }
-
-        return {
-            PID: pid,
-            "Cek Asset": cekAsset,
-            Remarks: remarks
-        };
-    });
-
-    const wb = XLSX.utils.book_new();
-    const ws = XLSX.utils.json_to_sheet(summaryData);
-    
-    ws['!cols'] = [{wch: 25}, {wch: 25}, {wch: 100}];
-
-    XLSX.utils.book_append_sheet(wb, ws, "SUMMARY");
-    XLSX.writeFile(wb, "SUMMARY_REPORT.xlsx");
+    const ws = XLSX.utils.json_to_sheet(reportData);
+    const newWb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(newWb, ws, "Summary");
+    XLSX.writeFile(newWb, "Validation_Summary_Report.xlsx");
 }
 
-export async function downloadSapBatch(type, mode) {
-    if (Object.keys(appState.processed).length === 0) {
-        alert("Belum ada file yang diproses.");
-        return;
+export function downloadSapBatch(type, mode) {
+    let mergedContent = "";
+    let count = 0;
+    
+    for (const key in appState.processed) {
+        const item = appState.processed[key];
+        if (type === 'pass' && item.status !== 'PASS') continue;
+        
+        if (mode === 'merge') {
+            mergedContent += item.sapTxt + "\n";
+        } else {
+            const base = item.pid || item.fileName.replace(/\.[^/.]+$/, "");
+            if (window.triggerTextDownload) window.triggerTextDownload(item.sapTxt, base + ".txt");
+        }
+        count++;
     }
 
-    const eligible = Object.values(appState.processed).filter(item => {
-        if (type === 'all') return true;
-        if (type === 'pass') return item.status === 'PASS';
-        if (type === 'fail') return item.status === 'FAIL';
-        return false;
-    });
-
-    if (eligible.length === 0) {
-        alert("Tidak ada file yang sesuai kriteria.");
+    if (count === 0) {
+        if(window.showToast) window.showToast("No files match the criteria.", "warning");
         return;
     }
 
     if (mode === 'merge') {
-        const mergedNameInput = document.getElementById('sapMergedFilename')?.value?.trim();
-        const firstBase = eligible[0].pid || eligible[0].fileName.replace(/\.[^/.]+$/, "");
-        let outName = mergedNameInput || (firstBase + "_SAP_MERGED_PASS.txt");
-        if (!outName.toLowerCase().endsWith('.txt')) outName += '.txt';
-
-        const mergedLines = [];
-        for (let i = 0; i < eligible.length; i++) {
-            const item = eligible[i];
-            if (!item.sapTxt) continue;
-            const lines = item.sapTxt.split(/\r?\n/);
-            if (lines.length === 0) continue;
-            if (mergedLines.length === 0) mergedLines.push(...lines);
-            else mergedLines.push(...lines.slice(1)); 
-        }
-
-        if (mergedLines.length === 0) {
-            alert("Tidak ada konten SAP TXT yang bisa digabung.");
-            return;
-        }
-        triggerTextDownload(mergedLines.join('\r\n'), outName);
-        return;
+        const filenameInput = document.getElementById('sapMergedFilename');
+        let dlName = filenameInput && filenameInput.value.trim() !== "" ? filenameInput.value.trim() : "SAP_MERGED";
+        if (!dlName.endsWith(".txt")) dlName += ".txt";
+        if (window.triggerTextDownload) window.triggerTextDownload(mergedContent, dlName);
     }
-
-    if (!confirm(`Akan mengunduh ${eligible.length} file TXT. Pastikan Anda mengizinkan 'Automatic Downloads' di browser Anda.\n\nLanjutkan?`)) {
-        return;
-    }
-
-    for (let i = 0; i < eligible.length; i++) {
-        const item = eligible[i];
-        if (!item.sapTxt) continue;
-        const base = item.pid || item.fileName.replace(/\.[^/.]+$/, "");
-        triggerTextDownload(item.sapTxt, base + ".txt");
-        await new Promise(resolve => setTimeout(resolve, 250));
-    }
+    
+    if(window.showToast) window.showToast(`Exported ${count} files.`, 'success');
 }
