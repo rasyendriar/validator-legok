@@ -12,15 +12,12 @@ import {
     updateDashboardUI, updateRowStatusUI, updateTableRowVerifiedStatus,
     toggleVerification, toggleForceStatus, toggleForceStatusFromViz,
     clearValidatorQueueUI, navigateFile, openVisualizer,
-    setLenFilter, filterTable, changePage
+    setLenFilter, filterTable, changePage, downloadRowXlsx
 } from './ui.js';
 
 // ==========================================
 // 1. MAPPING FUNGSI KE GLOBAL OBJECT WINDOW
 // ==========================================
-// Hal ini WAJIB dilakukan karena file ini diload sebagai <script type="module">
-// sehingga fungsi-fungsi di dalamnya tidak otomatis bersifat global untuk dipanggil via 'onclick' di HTML.
-
 // UI & Navigasi
 window.toggleDarkMode = toggleDarkMode;
 window.closeDropdowns = closeDropdowns;
@@ -37,13 +34,14 @@ window.changeZoom = changeZoom;
 window.resetZoom = resetZoom;
 
 // Validator Queue & Actions
-window.clearValidatorQueue = clearValidatorQueueUI; // Sesuai atribut onclick di HTML
+window.clearValidatorQueue = clearValidatorQueueUI; 
 window.startBatchValidation = startBatchValidation;
 window.setQueueFilter = setQueueFilter;
 window.filterQueueTable = filterQueueTable;
 window.toggleVerification = toggleVerification;
 window.toggleForceStatus = toggleForceStatus;
 window.toggleForceStatusFromViz = toggleForceStatusFromViz;
+window.downloadRowXlsx = downloadRowXlsx; // Menambahkan mapping untuk fungsi yang baru kita buat
 
 // Tenant Data Table (Modal)
 window.setLenFilter = setLenFilter;
@@ -115,7 +113,6 @@ window.downloadBatch = async function(type) {
 // ==========================================
 // 2. CROSS-MODULE DEPENDENCY BINDING
 // ==========================================
-// Memasukkan fungsi UI ke window agar bisa dipanggil dari dalam validator.js dan batcher.js
 window.updateDashboardUI = updateDashboardUI;
 window.updateRowStatusUI = updateRowStatusUI;
 window.updateTableRowVerifiedStatus = updateTableRowVerifiedStatus;
@@ -126,7 +123,6 @@ window.handleFiles = handleFiles;
 // 3. INISIALISASI SAAT DOM READY
 // ==========================================
 document.addEventListener("DOMContentLoaded", () => {
-    // 3.1 Setup Awal UI dan Modul
     GameSystem.init();
     initDarkMode();
     setupMainTabs();
@@ -135,11 +131,10 @@ document.addEventListener("DOMContentLoaded", () => {
     initConverter();
     setupKeyboardShortcuts();
     
-    // 3.2 Parse Master Data (Konfigurasi)
     const lines = MASTER_WC_CSV.split('\n');
     let loadedCount = 0;
     lines.forEach((line, index) => {
-        if(index === 0) return; // Skip header
+        if(index === 0) return; 
         const [stort, arbpl] = line.split(',').map(s => s.trim());
         if(stort && arbpl) {
             appState.workCenterData.set(stort, arbpl);
@@ -148,7 +143,6 @@ document.addEventListener("DOMContentLoaded", () => {
     });
     console.log(`Loaded ${loadedCount} Work Center rules.`);
 
-    // 3.3 Event Listener File Input Utama (Drop Area)
     const dropArea = document.getElementById('drop-area');
     const fileElem = document.getElementById('fileElem');
 
@@ -169,13 +163,10 @@ document.addEventListener("DOMContentLoaded", () => {
 function setupKeyboardShortcuts() {
     document.addEventListener('keydown', (e) => {
         const modal = document.getElementById('vizModal');
-        // Hanya izinkan shortcut jika modal visualizer sedang terbuka
         if (!modal || modal.classList.contains('hidden')) return;
 
-        // Abaikan jika user sedang mengetik di input search
         if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
 
-        // Switch Tabs (1-4)
         if(['1','2','3','4'].includes(e.key)) {
             if(e.key === '1') switchTab('viz');
             if(e.key === '2') switchTab('display');
@@ -187,7 +178,6 @@ function setupKeyboardShortcuts() {
         const contentViz = document.getElementById('content-viz');
         const isVizActive = contentViz && !contentViz.classList.contains('hidden');
         
-        // Visualizer specific controls (Zoom & Pan)
         if (isVizActive) {
             const step = 50;
             switch(e.key.toLowerCase()) {
