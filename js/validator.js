@@ -131,7 +131,14 @@ export async function processFile(file) {
                 if (belowData.length === 0) {
                     reportIssue('R7', 'Sheet', 'below_ring is empty', 'FAIL', errors, warnings);
                 } else {
-                    anchorPid = extractAnchorPid(belowData);
+                    // FIX: Menggunakan file.name sebagai ganti belowData untuk menghindari .replace is not a function error
+                    anchorPid = extractAnchorPid(file.name); 
+                    
+                    // Jika anchorPid masih kosong (file.name tidak memuat PID), coba cari dari baris pertama PLTXT sebagai fallback
+                    if (!anchorPid && belowData[0] && belowData[0].PLTXT) {
+                         const match = String(belowData[0].PLTXT).match(/(PID-\d+)/i);
+                         if (match) anchorPid = match[1].toUpperCase();
+                    }
                     
                     // R6: Cek Kolom Wajib
                     const reqCols = ['STRNO', 'PLTXT', 'ABCKZ', 'STORT', 'ARBPL'];
