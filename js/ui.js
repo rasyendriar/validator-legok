@@ -1,154 +1,90 @@
-import { appState, GameSystem } from './store.js';
+import { appState, GameSystem, SettingsSystem } from './store.js';
 import { generateSVG, applyZoom } from './visualizer.js';
-import { syncProcessedData } from './validator.js';
+import { downloadSingleExcel } from './utils.js';
 
-// --- GLOBAL EVENT LISTENER: INLINE EDITING ---
-// Akan menangkap perubahan pada cell ber-atribut contenteditable="true"
-document.addEventListener('blur', function(evt) {
-    if (evt.target && evt.target.classList.contains('editable-cell')) {
-        const cell = evt.target;
-        const row = cell.closest('tr');
-        if (!row) return;
-
-        const uuid = row.getAttribute('data-uuid');
-        const colName = cell.getAttribute('data-col');
-        const newValue = cell.innerText.trim();
-
-        const fileNameEl = document.getElementById('modalFileName');
-        if (!fileNameEl) return;
-        
-        const fileName = fileNameEl.innerText;
-        const data = appState.processed[fileName];
-        if (!data || !uuid || !colName) return;
-
-        // 1. Cek dan Update di Display Data
-        if (data.displayData) {
-            const displayItem = data.displayData.find(r => r._uuid === uuid);
-            if (displayItem) {
-                displayItem[colName] = newValue;
-            }
-        }
-
-        // 2. Cek dan Update di Tenant Data (below_ring)
-        if (data.belowData) {
-            const belowItem = data.belowData.find(r => r._uuid === uuid);
-            if (belowItem) {
-                belowItem[colName] = newValue;
-                
-                // Update juga referensi di currentData & filteredData agar tampilan tetap sinkron
-                const lowerColName = colName.toLowerCase();
-                const currentItem = appState.currentData.find(r => r._uuid === uuid);
-                if (currentItem && currentItem[lowerColName] !== undefined) currentItem[lowerColName] = newValue;
-                
-                const filteredItem = appState.filteredData.find(r => r._uuid === uuid);
-                if (filteredItem && filteredItem[lowerColName] !== undefined) filteredItem[lowerColName] = newValue;
-            }
-        }
-
-        // Sinkronisasi data yang diubah kembali ke memori file (Excel & SAP TXT)
-        syncProcessedData(fileName);
-    }
-}, true); // Gunakan mode capture untuk event blur
-
-// --- SORTABLE JS INITIALIZATION ---
-export function initTableSortable(fileName) {
-    if (typeof Sortable === 'undefined') return; // Bypass jika CDN gagal/belum diload
-
-    const data = appState.processed[fileName];
-    if (!data) return;
-
-    // 1. Sortable untuk Display Data Table
-    const displayTbody = document.getElementById('display-ring-body');
-    if (displayTbody && !displayTbody.sortableInstance) {
-        displayTbody.sortableInstance = new Sortable(displayTbody, {
-            handle: '.drag-handle',
-            animation: 150,
-            ghostClass: 'sortable-ghost',
-            onEnd: function (evt) {
-                const uuid = evt.item.getAttribute('data-uuid');
-                const fileName = document.getElementById('modalFileName').innerText;
-                const activeData = appState.processed[fileName];
-                
-                const oldIndex = activeData.displayData.findIndex(r => r._uuid === uuid);
-                if (oldIndex === -1) return;
-                
-                // Pindahkan elemen di array asli
-                const newIndex = evt.newIndex;
-                const [movedItem] = activeData.displayData.splice(oldIndex, 1);
-                activeData.displayData.splice(newIndex, 0, movedItem);
-                
-                // Sinkronisasi pemindahan urutan ke memori file (Excel & SAP TXT)
-                syncProcessedData(fileName);
-                
-                showToast('Urutan Display Data berhasil diperbarui', 'success');
-            }
-        });
-    }
-
-    // 2. Sortable untuk Tenant Data Table (dengan Pagination/Filter)
-    const tenantTbody = document.getElementById('data-table-body');
-    if (tenantTbody && !tenantTbody.sortableInstance) {
-        tenantTbody.sortableInstance = new Sortable(tenantTbody, {
-            handle: '.drag-handle',
-            animation: 150,
-            ghostClass: 'sortable-ghost',
-            onEnd: function (evt) {
-                const uuid = evt.item.getAttribute('data-uuid');
-                const fileName = document.getElementById('modalFileName').innerText;
-                const activeData = appState.processed[fileName];
-                
-                // Dapatkan indeks asli relatif terhadap pagination halaman saat ini
-                const startIdx = (appState.currentPage - 1) * appState.rowsPerPage;
-                const viewOldIndex = startIdx + evt.oldIndex;
-                const viewNewIndex = startIdx + evt.newIndex;
-
-                // 1. Update array filteredData
-                const [movedFiltered] = appState.filteredData.splice(viewOldIndex, 1);
-                appState.filteredData.splice(viewNewIndex, 0, movedFiltered);
-
-                // 2. Update array asli (belowData)
-                const originalOldIndex = activeData.belowData.findIndex(r => r._uuid === uuid);
-                if (originalOldIndex === -1) return;
-                
-                const [movedOriginal] = activeData.belowData.splice(originalOldIndex, 1);
-
-                // Tentukan lokasi penyisipan akurat menggunakan sibling terdekat
-                const prevItemInView = appState.filteredData[viewNewIndex - 1];
-                if (!prevItemInView) {
-                    // Jika di drag ke paling atas
-                    const nextItemInView = appState.filteredData[viewNewIndex + 1];
-                    if (nextItemInView) {
-                        const nextOriginalIndex = activeData.belowData.findIndex(r => r._uuid === nextItemInView._uuid);
-                        activeData.belowData.splice(nextOriginalIndex, 0, movedOriginal);
-                    } else {
-                        activeData.belowData.unshift(movedOriginal);
-                    }
-                } else {
-                    // Masukkan tepat setelah item sebelumnya
-                    const prevOriginalIndex = activeData.belowData.findIndex(r => r._uuid === prevItemInView._uuid);
-                    activeData.belowData.splice(prevOriginalIndex + 1, 0, movedOriginal);
-                }
-
-                // 3. Resync currentData secara utuh agar indexing terjaga
-                appState.currentData = activeData.belowData.map(r => ({
-                    _uuid: r._uuid,
-                    strno: String(r.STRNO || ""),
-                    pltxt: String(r.PLTXT || ""),
-                    abckz: String(r.ABCKZ || ""),
-                    stort: String(r.STORT || ""), 
-                    arbpl: String(r.ARBPL || "")
-                }));
-
-                // Sinkronisasi pemindahan urutan ke memori file (Excel & SAP TXT)
-                syncProcessedData(fileName);
-
-                showToast('Urutan Tenant Data berhasil diperbarui', 'success');
-            }
-        });
+// ==========================================
+// 1. SETTINGS MENU LOGIC
+// ==========================================
+export function toggleSettingsModal() {
+    const modal = document.getElementById('settingsModal');
+    if (modal.classList.contains('hidden')) {
+        renderSettingsMenu();
+        modal.classList.remove('hidden');
+    } else {
+        modal.classList.add('hidden');
     }
 }
 
-// --- DARK MODE LOGIC ---
+export function renderSettingsMenu() {
+    const container = document.getElementById('settingsContent');
+    if (!container) return;
+    container.innerHTML = '';
+
+    const settings = appState.ruleSettings;
+    
+    // Urutkan rule berdasarkan ID (R5, R6... R20)
+    const sortedKeys = Object.keys(settings).sort((a, b) => {
+        return parseInt(a.substring(1)) - parseInt(b.substring(1));
+    });
+
+    sortedKeys.forEach(key => {
+        const rule = settings[key];
+        const row = document.createElement('div');
+        row.className = 'grid grid-cols-12 gap-4 items-center p-3 bg-gray-50 dark:bg-gray-800/50 rounded-lg border border-gray-100 dark:border-gray-700 transition hover:bg-gray-100 dark:hover:bg-gray-800';
+        
+        row.innerHTML = `
+            <div class="col-span-2 font-bold text-xs text-slate-700 dark:text-gray-300">${rule.id}</div>
+            <div class="col-span-5 text-sm text-slate-600 dark:text-gray-400">${rule.name}</div>
+            <div class="col-span-2 flex justify-center">
+                <label class="relative inline-flex items-center cursor-pointer" title="Enable/Disable Rule">
+                    <input type="checkbox" class="sr-only peer rule-enabled-toggle" data-rule="${rule.id}" ${rule.enabled ? 'checked' : ''}>
+                    <div class="w-9 h-5 bg-gray-200 peer-focus:outline-none rounded-full peer dark:bg-gray-700 peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all dark:border-gray-600 peer-checked:bg-mitratel-red"></div>
+                </label>
+            </div>
+            <div class="col-span-3 flex justify-center">
+                <select class="rule-severity-select bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-600 text-gray-700 dark:text-gray-300 text-xs rounded focus:ring-mitratel-red focus:border-mitratel-red block w-full p-1.5 outline-none transition" data-rule="${rule.id}">
+                    <option value="FAIL" ${rule.severity === 'FAIL' ? 'selected' : ''}>FAIL</option>
+                    <option value="WARNING" ${rule.severity === 'WARNING' ? 'selected' : ''}>WARNING</option>
+                </select>
+            </div>
+        `;
+        container.appendChild(row);
+    });
+}
+
+export function saveSettingsUI() {
+    const container = document.getElementById('settingsContent');
+    if (!container) return;
+
+    const newSettings = JSON.parse(JSON.stringify(appState.ruleSettings)); // Clone
+    
+    // Ambil semua toggle status
+    const toggles = container.querySelectorAll('.rule-enabled-toggle');
+    toggles.forEach(toggle => {
+        const ruleId = toggle.getAttribute('data-rule');
+        if (newSettings[ruleId]) {
+            newSettings[ruleId].enabled = toggle.checked;
+        }
+    });
+
+    // Ambil semua dropdown severity
+    const selects = container.querySelectorAll('.rule-severity-select');
+    selects.forEach(select => {
+        const ruleId = select.getAttribute('data-rule');
+        if (newSettings[ruleId]) {
+            newSettings[ruleId].severity = select.value;
+        }
+    });
+
+    // Simpan ke storage dan state
+    SettingsSystem.save(newSettings);
+    showToast('Validation settings saved successfully! Changes apply on next validation.', 'success');
+    toggleSettingsModal();
+}
+
+// ==========================================
+// 2. DARK MODE & TABS LOGIC
+// ==========================================
 export function toggleDarkMode() {
     const html = document.documentElement;
     const icon = document.getElementById('themeIcon');
@@ -174,7 +110,6 @@ export function initDarkMode() {
     }
 }
 
-// --- TABS LOGIC ---
 export function setupMainTabs() {
     const btnV = document.getElementById('tabBtnValidator');
     const btnB = document.getElementById('tabBtnBatcher');
@@ -225,7 +160,6 @@ export function switchTab(tab) {
     const divData = document.getElementById('content-data');
     const divErrors = document.getElementById('content-errors');
 
-    // Reset Styles
     [btnViz, btnDisplay, btnData, btnErrors].forEach(btn => {
         if(btn) {
             btn.className = "nav-btn py-4 text-sm font-medium text-gray-500 hover:text-slate-800 dark:text-gray-400 dark:hover:text-white transition whitespace-nowrap";
@@ -236,7 +170,6 @@ export function switchTab(tab) {
         if(div) div.classList.add('hidden');
     });
 
-    // Activate Selected
     let activeBtn;
     if (tab === 'viz' && btnViz && divViz) {
         activeBtn = btnViz;
@@ -260,7 +193,9 @@ export function switchTab(tab) {
     }
 }
 
-// --- MODALS & DROPDOWNS ---
+// ==========================================
+// 3. MODALS, DROPDOWNS & TOASTS
+// ==========================================
 export function toggleGuide() { document.getElementById('guideModal').classList.toggle('hidden'); }
 export function closeModal() { document.getElementById('vizModal').classList.add('hidden'); }
 export function closeMissingFiles() { document.getElementById('missingFilesModal').classList.add('hidden'); }
@@ -286,7 +221,31 @@ export function closeDropdowns(e) {
     }
 }
 
-// --- QUEUE SEARCH & FILTER ---
+export function showToast(message, type = 'info') {
+    const container = document.getElementById('toast-container');
+    if(!container) return;
+
+    const toast = document.createElement('div');
+    
+    let bgClass = type === 'success' ? 'bg-emerald-500' : 'bg-blue-500';
+    if (type === 'error') bgClass = 'bg-red-500';
+    if (type === 'warning') bgClass = 'bg-orange-500';
+
+    toast.className = `toast ${bgClass} text-white px-4 py-3 rounded-lg shadow-lg text-sm font-medium flex items-center gap-2`;
+    toast.innerHTML = `<i class="fa-solid fa-bell"></i> <span>${message}</span>`;
+    
+    container.appendChild(toast);
+    
+    setTimeout(() => {
+        toast.style.opacity = '0';
+        toast.style.transform = 'translateY(20px)';
+        setTimeout(() => container.removeChild(toast), 300);
+    }, 3000);
+}
+
+// ==========================================
+// 4. MAIN QUEUE DASHBOARD UI
+// ==========================================
 export let currentQueueFilter = 'all';
 
 export function setQueueFilter(status) {
@@ -305,7 +264,6 @@ export function setQueueFilter(status) {
             btn.className = "px-3 py-1.5 text-xs font-bold rounded-lg text-gray-500 hover:bg-gray-100 dark:text-gray-400 dark:hover:bg-gray-700 transition-all";
         }
     });
-
     filterQueueTable();
 }
 
@@ -345,29 +303,6 @@ export function filterQueueTable() {
     }
 }
 
-// --- TOAST NOTIFICATION ---
-export function showToast(message, type = 'info') {
-    const container = document.getElementById('toast-container');
-    if(!container) return;
-
-    const toast = document.createElement('div');
-    
-    let bgClass = type === 'success' ? 'bg-emerald-500' : 'bg-blue-500';
-    if (type === 'error') bgClass = 'bg-red-500';
-
-    toast.className = `toast ${bgClass} text-white px-4 py-3 rounded-lg shadow-lg text-sm font-medium flex items-center gap-2`;
-    toast.innerHTML = `<i class="fa-solid fa-bell"></i> <span>${message}</span>`;
-    
-    container.appendChild(toast);
-    
-    setTimeout(() => {
-        toast.style.opacity = '0';
-        toast.style.transform = 'translateY(20px)';
-        setTimeout(() => container.removeChild(toast), 300);
-    }, 3000);
-}
-
-// --- DASHBOARD & STATS UI ---
 export function recalculateStats() {
     let total = 0, pass = 0, fail = 0, warning = 0;
     Object.values(appState.processed).forEach(item => {
@@ -394,6 +329,32 @@ export function updateDashboardUI() {
 
     if (el('badge-sap-all')) el('badge-sap-all').innerText = appState.stats.total;
     if (el('badge-sap-pass')) el('badge-sap-pass').innerText = appState.stats.pass;
+}
+
+export function clearValidatorQueueUI() {
+    if(!confirm("Are you sure you want to clear all files from the queue?")) return;
+
+    appState.queue = [];
+    appState.processed = {};
+    appState.processedKeys = [];
+    appState.stats = { total: 0, pass: 0, fail: 0, warning: 0 };
+    
+    document.getElementById('result-body').innerHTML = '';
+    document.getElementById('btnStartValidation').classList.add('hidden');
+    document.getElementById('summary-dashboard').classList.add('hidden');
+    document.getElementById('groupActions').classList.add('hidden');
+    document.getElementById('btnClearFiles').classList.add('hidden');
+    document.getElementById('fileElem').value = '';
+}
+
+// ==========================================
+// 5. ROW STATUS & ACTIONS UI
+// ==========================================
+export function downloadRowXlsx(fileName) {
+    const item = appState.processed[fileName];
+    if(item && item.wb) {
+        downloadSingleExcel(item.wb, `VALIDATED_v4_${item.fileName}`);
+    }
 }
 
 export function updateRowStatusUI(rowId, item) {
@@ -430,7 +391,7 @@ export function updateRowStatusUI(rowId, item) {
             <button onclick="window.toggleForceStatus('${item.fileName}')" class="bg-white border border-gray-200 dark:bg-gray-800 dark:border-gray-600 ${toggleColor} p-2 rounded-lg transition" title="${toggleTitle}">
                <i class="fa-solid ${toggleIcon}"></i>
             </button>
-            <button onclick="window.downloadBatchFile('${item.fileName}')" class="bg-blue-50 hover:bg-blue-100 dark:bg-blue-900/20 dark:hover:bg-blue-900/40 text-blue-600 dark:text-blue-300 p-2 rounded-lg transition" title="Download XLSX">
+            <button onclick="window.downloadRowXlsx('${item.fileName}')" class="bg-blue-50 hover:bg-blue-100 dark:bg-blue-900/20 dark:hover:bg-blue-900/40 text-blue-600 dark:text-blue-300 p-2 rounded-lg transition" title="Download XLSX">
                <i class="fa-solid fa-file-excel"></i>
             </button>
             <button onclick="window.downloadSapTxt('${item.fileName}')" class="bg-emerald-50 hover:bg-emerald-100 dark:bg-emerald-900/20 dark:hover:bg-emerald-900/40 text-emerald-600 dark:text-emerald-300 p-2 rounded-lg transition" title="Download SAP TXT">
@@ -440,7 +401,38 @@ export function updateRowStatusUI(rowId, item) {
     `;
 }
 
-// --- VERIFICATION LOGIC UI ---
+export function toggleForceStatus(fileName) {
+    const item = appState.processed[fileName];
+    if(!item) return;
+
+    if (item.status === 'PASS' || item.status === 'WARNING') {
+        item.status = 'FAIL';
+        item.isManuallyOverridden = true;
+        item.originalStatus = item.originalStatus || 'PASS';
+    } else {
+        item.status = 'PASS';
+        item.isManuallyOverridden = true;
+        item.originalStatus = item.originalStatus || 'FAIL';
+    }
+
+    recalculateStats();
+    updateRowStatusUI(item.rowId, item);
+    
+    const modal = document.getElementById('vizModal');
+    if (appState.targetPID === item.pid && modal && !modal.classList.contains('hidden')) {
+        updateVizStatusHeader(item);
+        updateForceToggleButton(item);
+    }
+
+    showToast(`Status updated to ${item.status}`, item.status === 'PASS' ? 'success' : 'error');
+}
+
+export function toggleForceStatusFromViz() {
+    const pid = appState.targetPID;
+    const item = Object.values(appState.processed).find(p => p.pid === pid);
+    if (item) toggleForceStatus(item.fileName);
+}
+
 export function toggleVerification() {
     const pid = appState.targetPID;
     if(!pid) return;
@@ -482,41 +474,6 @@ export function updateTableRowVerifiedStatus(rowId, pid) {
     }
 }
 
-// --- FORCE STATUS UI ---
-export function toggleForceStatus(fileName) {
-    const item = appState.processed[fileName];
-    if(!item) return;
-
-    if (item.status === 'PASS' || item.status === 'WARNING') {
-        item.status = 'FAIL';
-        item.isManuallyOverridden = true;
-        item.originalStatus = item.originalStatus || 'PASS';
-    } else {
-        item.status = 'PASS';
-        item.isManuallyOverridden = true;
-        item.originalStatus = item.originalStatus || 'FAIL';
-    }
-
-    recalculateStats();
-    updateRowStatusUI(item.rowId, item);
-    
-    const modal = document.getElementById('vizModal');
-    if (appState.targetPID === item.pid && modal && !modal.classList.contains('hidden')) {
-        updateVizStatusHeader(item);
-        updateForceToggleButton(item);
-    }
-
-    showToast(`Status updated to ${item.status}`, item.status === 'PASS' ? 'success' : 'error');
-}
-
-export function toggleForceStatusFromViz() {
-    const pid = appState.targetPID;
-    const item = Object.values(appState.processed).find(p => p.pid === pid);
-    if (item) {
-        toggleForceStatus(item.fileName);
-    }
-}
-
 export function updateVizStatusHeader(item) {
     const badge = document.getElementById('vizStatusBadge');
     if(!badge) return;
@@ -547,25 +504,9 @@ export function updateForceToggleButton(item) {
     }
 }
 
-// --- QUEUE ACTIONS ---
-export function clearValidatorQueueUI() {
-    if(!confirm("Are you sure you want to clear all files from the queue?")) return;
-
-    appState.queue = [];
-    appState.processed = {};
-    appState.processedKeys = [];
-    appState.stats = { total: 0, pass: 0, fail: 0, warning: 0 };
-    
-    document.getElementById('result-body').innerHTML = '';
-    document.getElementById('btnStartValidation').classList.add('hidden');
-    document.getElementById('summary-dashboard').classList.add('hidden');
-    document.getElementById('groupActions').classList.add('hidden');
-    document.getElementById('btnClearFiles').classList.add('hidden');
-    
-    document.getElementById('fileElem').value = '';
-}
-
-// --- MODAL VISUALIZER (DATA RENDERING) ---
+// ==========================================
+// 6. VISUALIZER MODAL & DATA RENDERING
+// ==========================================
 export function navigateFile(direction) {
     const newIndex = appState.currentFileIndex + direction;
     if (newIndex >= 0 && newIndex < appState.processedKeys.length) {
@@ -596,11 +537,11 @@ export function openVisualizer(fileName) {
     updateForceToggleButton(data);
 
     document.getElementById('vizModal').classList.remove('hidden');
-    
     updateVerifyButton(GameSystem.isVerified(data.pid));
 
+    // Mapping ulang currentData dengan properti _uuid untuk Sinkronisasi Edit & Drag
     appState.currentData = data.belowData.map(r => ({
-        _uuid: r._uuid, // Bawa _uuid untuk fitur Drag & Drop / Edit
+        _uuid: r._uuid,
         strno: String(r.STRNO || ""),
         pltxt: String(r.PLTXT || ""),
         abckz: String(r.ABCKZ || ""),
@@ -611,21 +552,16 @@ export function openVisualizer(fileName) {
     appState.currentPage = 1;
 
     switchTab('viz');
-    
     applyZoom(); 
-    
     generateSVG(data.displayData, data.belowData, data.pid);
-    renderDisplayRingTable(data.displayData);
     
-    // Inisialisasi Sortable tiap kali visualizer dibuka/dirender awal
-    initTableSortable(fileName);
-
+    renderDisplayRingTable(data.displayData, fileName);
     updatePaginationInfo();
-    const allIssues = [...data.errors, ...(data.warnings || [])];
-    renderErrorTable(allIssues);
+    renderErrorTable([...data.errors, ...(data.warnings || [])]);
 }
 
-export function renderDisplayRingTable(displayData) {
+// Menampilkan Data Display dengan Fitur Drag Handle dan ContentEditable
+export function renderDisplayRingTable(displayData, fileName) {
     const thead = document.getElementById('display-ring-head');
     const tbody = document.getElementById('display-ring-body');
     if(!thead || !tbody) return;
@@ -634,17 +570,17 @@ export function renderDisplayRingTable(displayData) {
     tbody.innerHTML = '';
     
     if (!displayData || displayData.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="5" class="px-6 py-8 text-center text-gray-400 italic">No Data Available in display_ring</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="6" class="px-6 py-8 text-center text-gray-400 italic">No Data Available in display_ring</td></tr>';
         return;
     }
 
     const allKeys = Object.keys(displayData[0]);
-    // Jangan tampilkan kolom _uuid dan atribut internal lainnya di header UI
-    const columns = allKeys.filter(k => k !== 'PID' && k !== 'RING_ID' && k !== '_uuid');
+    // Filter _uuid dan kolom internal
+    const columns = allKeys.filter(k => k !== 'PID' && k !== 'RING_ID' && k !== '_uuid' && k !== '_rowIndex');
 
-    let headerHTML = '<tr>';
-    // Kolom header kosong untuk Ikon Drag Handle
-    headerHTML += `<th class="py-3 px-2 text-center text-xs font-bold text-gray-500 dark:text-gray-400 uppercase w-8 sticky-header border-b border-gray-100 dark:border-gray-800"></th>`;
+    let headerHTML = `<tr>
+        <th class="px-3 py-3 w-10 text-center text-xs font-bold text-gray-500 uppercase tracking-wider sticky-header border-b border-gray-100 dark:border-gray-800"><i class="fa-solid fa-sort"></i></th>
+    `;
     columns.forEach(col => {
         headerHTML += `<th class="px-4 py-3 text-left text-xs font-bold text-gray-500 dark:text-gray-400 uppercase tracking-wider sticky-header border-b border-gray-100 dark:border-gray-800">${col.replace(/_/g, ' ')}</th>`;
     });
@@ -653,74 +589,80 @@ export function renderDisplayRingTable(displayData) {
 
     displayData.forEach(row => {
         const tr = document.createElement('tr');
-        tr.className = "hover:bg-gray-50 dark:hover:bg-gray-800/50 transition";
-        tr.setAttribute('data-uuid', row._uuid || ''); // Embed UUID untuk pelacakan baris
-
-        // Kolom pertama berisi ikon Hamburger (Drag Handle)
-        let rowHTML = `<td class="px-2 py-2 border-b border-gray-50 dark:border-gray-800 text-center align-middle"><i class="fa-solid fa-bars drag-handle text-gray-400 hover:text-mitratel-red transition-colors"></i></td>`;
+        tr.className = "hover:bg-gray-50 dark:hover:bg-gray-800/50 transition bg-white dark:bg-gray-900";
+        if (row._uuid) tr.setAttribute('data-uuid', row._uuid);
         
+        let rowHTML = `<td class="px-3 py-2 text-center cursor-grab drag-handle text-gray-400 hover:text-slate-700 dark:hover:text-white"><i class="fa-solid fa-bars"></i></td>`;
         columns.forEach(col => {
-            // Jadikan setiap sel bisa diedit dengan contenteditable dan class editable-cell
-            rowHTML += `<td class="px-4 py-2 border-b border-gray-50 dark:border-gray-800 text-slate-600 dark:text-gray-300 whitespace-nowrap editable-cell" contenteditable="true" data-col="${col}">${row[col] || '-'}</td>`;
+            rowHTML += `<td class="px-4 py-2 border-b border-gray-50 dark:border-gray-800 text-slate-600 dark:text-gray-300 whitespace-nowrap editable-cell hover:outline hover:outline-1 hover:outline-dashed hover:outline-gray-400 dark:hover:outline-gray-600" contenteditable="true" data-col="${col}" onblur="window.handleCellEdit(event, '${fileName}', 'displayData')" onkeydown="window.handleCellEdit(event, '${fileName}', 'displayData')">${row[col] || '-'}</td>`;
         });
-        
         tr.innerHTML = rowHTML;
         tbody.appendChild(tr);
     });
 
-    // Re-bind sortable jika fileName tersedia
-    const currentFileName = document.getElementById('modalFileName')?.innerText;
-    if (currentFileName && appState.processed[currentFileName]) {
-        initTableSortable(currentFileName);
-    }
+    // Re-initialize SortableJS
+    setTimeout(() => { if (window.initTableSortable) window.initTableSortable(fileName); }, 100);
 }
 
-export function renderErrorTable(errors) {
-    const tbody = document.getElementById('error-table-body');
-    const badge = document.getElementById('error-badge');
-    const countDisplay = document.getElementById('error-count-display');
-    if(!tbody) return;
+// Menampilkan Tenant Data (Below Ring) dengan Drag Handle & ContentEditable
+export function renderTablePage() {
+    const tbody = document.getElementById('data-table-body');
+    const thead = document.getElementById('data-table-head');
+    if(!tbody || !thead) return;
 
-    tbody.innerHTML = '';
+    // Pastikan thead selalu memiliki kolom aksi/drag
+    if (thead.innerHTML.trim() === '') {
+        thead.innerHTML = `
+            <tr>
+                <th class="py-4 px-3 text-center text-xs font-bold text-gray-500 dark:text-gray-400 uppercase tracking-wider w-10"><i class="fa-solid fa-sort"></i></th>
+                <th class="py-4 px-6 text-left text-xs font-bold text-gray-500 dark:text-gray-400 uppercase tracking-wider">STRNO</th>
+                <th class="py-4 px-6 text-left text-xs font-bold text-gray-500 dark:text-gray-400 uppercase tracking-wider">ABCKZ</th>
+                <th class="py-4 px-6 text-left text-xs font-bold text-gray-500 dark:text-gray-400 uppercase tracking-wider">PLTXT</th>
+                <th class="py-4 px-6 text-left text-xs font-bold text-gray-500 dark:text-gray-400 uppercase tracking-wider">STORT</th>
+                <th class="py-4 px-6 text-left text-xs font-bold text-gray-500 dark:text-gray-400 uppercase tracking-wider">ARBPL</th>
+            </tr>
+        `;
+    }
+
+    tbody.innerHTML = "";
     
-    if(!errors || errors.length === 0) {
-        tbody.innerHTML = `<tr><td colspan="3" class="px-6 py-12 text-center text-gray-400 italic"><i class="fa-solid fa-check-circle text-4xl text-green-100 mb-2 block"></i>No validation issues found</td></tr>`;
-        if(badge) {
-            badge.classList.add('hidden');
-            badge.innerText = '0';
-        }
-        if(countDisplay) {
-            countDisplay.innerText = '0 Issues Found';
-            countDisplay.className = "text-xs bg-green-50 dark:bg-green-900/30 text-green-600 dark:text-green-300 px-3 py-1 rounded-full font-medium";
-        }
+    const startIdx = (appState.currentPage - 1) * appState.rowsPerPage;
+    const pageData = appState.filteredData.slice(startIdx, startIdx + appState.rowsPerPage);
+    const fileName = appState.processedKeys[appState.currentFileIndex];
+
+    if (pageData.length === 0) {
+        tbody.innerHTML = `<tr><td colspan="6" class="py-8 text-center text-gray-400 italic">No data found matching your search</td></tr>`;
         return;
     }
 
-    if(badge) {
-        badge.classList.remove('hidden');
-        badge.innerText = errors.length;
-    }
-    if(countDisplay) {
-        countDisplay.innerText = `${errors.length} Issues Found`;
-        countDisplay.className = "text-xs bg-red-50 dark:bg-red-900/30 text-red-600 dark:text-red-300 px-3 py-1 rounded-full font-medium";
-    }
-
-    errors.forEach(err => {
+    pageData.forEach(row => {
         const tr = document.createElement('tr');
-        const isWarning = (err.Rule === "R18_HIGH_OCCUPANCY" || err.Rule === "R20_DISPLAY_CHAIN" || err.Rule === "R16_ANTI_SPLIT_WARN" || err.Rule === "R19_CONNECTIVITY");
-        const rowClass = isWarning ? "hover:bg-orange-50 dark:hover:bg-orange-900/10" : "hover:bg-red-50 dark:hover:bg-red-900/10";
-        const textClass = isWarning ? "text-orange-600 dark:text-orange-400" : "text-red-600 dark:text-red-400";
+        tr.className = "bg-white dark:bg-gray-900";
+        const isMatch = appState.targetPID && row.pltxt.includes(appState.targetPID);
+        if(isMatch) tr.classList.add('row-highlight');
+        if(row._uuid) tr.setAttribute('data-uuid', row._uuid);
 
-        tr.className = `${rowClass} transition border-b border-gray-100 dark:border-gray-800`;
+        // Cell Editable Class untuk mempermudah styling/event
+        const editClass = "py-2 px-6 text-sm editable-cell hover:outline hover:outline-1 hover:outline-dashed hover:outline-gray-400 dark:hover:outline-gray-600";
+        
         tr.innerHTML = `
-            <td class="px-6 py-3 text-sm font-mono text-slate-500 dark:text-gray-400">${err.Row}</td>
-            <td class="px-6 py-3 text-sm font-bold ${textClass}">${err.Rule}</td>
-            <td class="px-6 py-3 text-sm text-slate-700 dark:text-gray-300">${err.Message}</td>
+            <td class="py-2 px-3 text-center cursor-grab drag-handle text-gray-400 hover:text-slate-700 dark:hover:text-white border-b border-gray-50 dark:border-gray-800"><i class="fa-solid fa-bars"></i></td>
+            <td class="${editClass} font-mono text-slate-600 dark:text-gray-300 border-b border-gray-50 dark:border-gray-800" contenteditable="true" data-col="STRNO" onblur="window.handleCellEdit(event, '${fileName}', 'belowData')" onkeydown="window.handleCellEdit(event, '${fileName}', 'belowData')">${row.strno}</td>
+            <td class="${editClass} text-slate-800 dark:text-white font-medium border-b border-gray-50 dark:border-gray-800" contenteditable="true" data-col="ABCKZ" onblur="window.handleCellEdit(event, '${fileName}', 'belowData')" onkeydown="window.handleCellEdit(event, '${fileName}', 'belowData')">${row.abckz}</td>
+            <td class="${editClass} ${isMatch ? 'font-bold text-mitratel-red' : 'text-slate-800 dark:text-white'} border-b border-gray-50 dark:border-gray-800" contenteditable="true" data-col="PLTXT" onblur="window.handleCellEdit(event, '${fileName}', 'belowData')" onkeydown="window.handleCellEdit(event, '${fileName}', 'belowData')">${row.pltxt || '-'}</td>
+            <td class="${editClass} text-slate-500 dark:text-gray-400 border-b border-gray-50 dark:border-gray-800" contenteditable="true" data-col="STORT" onblur="window.handleCellEdit(event, '${fileName}', 'belowData')" onkeydown="window.handleCellEdit(event, '${fileName}', 'belowData')">${row.stort || '-'}</td>
+            <td class="${editClass} text-slate-500 dark:text-gray-400 border-b border-gray-50 dark:border-gray-800" contenteditable="true" data-col="ARBPL" onblur="window.handleCellEdit(event, '${fileName}', 'belowData')" onkeydown="window.handleCellEdit(event, '${fileName}', 'belowData')">${row.arbpl || '-'}</td>
         `;
         tbody.appendChild(tr);
     });
+
+    // Re-initialize SortableJS
+    setTimeout(() => { if (window.initTableSortable) window.initTableSortable(fileName); }, 100);
 }
 
+// ==========================================
+// 7. DATA FILTRATION & PAGINATION
+// ==========================================
 export function setLenFilter(len) {
     appState.currentLenFilter = len;
     ['all', '17', '21', '26', '30'].forEach(l => {
@@ -793,41 +735,184 @@ export function updatePaginationInfo() {
     }
 }
 
-export function renderTablePage() {
-    const tbody = document.getElementById('data-table-body');
+// ==========================================
+// 8. ERROR LOG TABLE
+// ==========================================
+export function renderErrorTable(errors) {
+    const tbody = document.getElementById('error-table-body');
+    const badge = document.getElementById('error-badge');
+    const countDisplay = document.getElementById('error-count-display');
     if(!tbody) return;
-    tbody.innerHTML = "";
-    
-    const startIdx = (appState.currentPage - 1) * appState.rowsPerPage;
-    const pageData = appState.filteredData.slice(startIdx, startIdx + appState.rowsPerPage);
 
-    if (pageData.length === 0) {
-        tbody.innerHTML = `<tr><td colspan="6" class="py-8 text-center text-gray-400 italic">No data found matching your search</td></tr>`;
+    tbody.innerHTML = '';
+    
+    if(!errors || errors.length === 0) {
+        tbody.innerHTML = `<tr><td colspan="3" class="px-6 py-12 text-center text-gray-400 italic"><i class="fa-solid fa-check-circle text-4xl text-green-100 mb-2 block"></i>No validation issues found</td></tr>`;
+        if(badge) {
+            badge.classList.add('hidden');
+            badge.innerText = '0';
+        }
+        if(countDisplay) {
+            countDisplay.innerText = '0 Issues Found';
+            countDisplay.className = "text-xs bg-green-50 dark:bg-green-900/30 text-green-600 dark:text-green-300 px-3 py-1 rounded-full font-medium";
+        }
         return;
     }
 
-    pageData.forEach(row => {
+    if(badge) {
+        badge.classList.remove('hidden');
+        badge.innerText = errors.length;
+    }
+    if(countDisplay) {
+        countDisplay.innerText = `${errors.length} Issues Found`;
+        countDisplay.className = "text-xs bg-red-50 dark:bg-red-900/30 text-red-600 dark:text-red-300 px-3 py-1 rounded-full font-medium";
+    }
+
+    errors.forEach(err => {
         const tr = document.createElement('tr');
-        tr.setAttribute('data-uuid', row._uuid || ''); // Embed UUID untuk pelacakan baris
-        
-        const isMatch = appState.targetPID && row.pltxt.includes(appState.targetPID);
-        if(isMatch) tr.classList.add('row-highlight');
-        
-        // Render baris dengan ikon drag dan cell yang editable
+        // Warning Logic berdasarkan keyword R18/R20/R16/R19 atau berdasarkan severity
+        const isWarning = (err.Severity === "WARNING" || err.Rule === "R18_HIGH_OCCUPANCY" || err.Rule === "R20_DISPLAY_CHAIN" || err.Rule === "R16_ANTI_SPLIT_WARN" || err.Rule === "R19_CONNECTIVITY");
+        const rowClass = isWarning ? "hover:bg-orange-50 dark:hover:bg-orange-900/10" : "hover:bg-red-50 dark:hover:bg-red-900/10";
+        const textClass = isWarning ? "text-orange-600 dark:text-orange-400" : "text-red-600 dark:text-red-400";
+
+        tr.className = `${rowClass} transition border-b border-gray-100 dark:border-gray-800`;
         tr.innerHTML = `
-            <td class="py-2 px-2 text-center align-middle"><i class="fa-solid fa-bars drag-handle text-gray-400 hover:text-mitratel-red transition-colors"></i></td>
-            <td class="py-2 px-6 text-sm font-mono text-slate-600 dark:text-gray-300 editable-cell" contenteditable="true" data-col="STRNO">${row.strno}</td>
-            <td class="py-2 px-6 text-sm text-slate-800 dark:text-white font-medium editable-cell" contenteditable="true" data-col="ABCKZ">${row.abckz}</td>
-            <td class="py-2 px-6 text-sm ${isMatch ? 'font-bold text-mitratel-red' : 'text-slate-800 dark:text-white'} editable-cell" contenteditable="true" data-col="PLTXT">${row.pltxt || '-'}</td>
-            <td class="py-2 px-6 text-sm text-slate-500 dark:text-gray-400 editable-cell" contenteditable="true" data-col="STORT">${row.stort || '-'}</td>
-            <td class="py-2 px-6 text-sm text-slate-500 dark:text-gray-400 editable-cell" contenteditable="true" data-col="ARBPL">${row.arbpl || '-'}</td>
+            <td class="px-6 py-3 text-sm font-mono text-slate-500 dark:text-gray-400">${err.Row}</td>
+            <td class="px-6 py-3 text-sm font-bold ${textClass}">${err.Rule}</td>
+            <td class="px-6 py-3 text-sm text-slate-700 dark:text-gray-300">${err.Message}</td>
         `;
         tbody.appendChild(tr);
     });
+}
 
-    // Re-bind sortable jika fileName tersedia (misal habis search/pindah halaman)
-    const currentFileName = document.getElementById('modalFileName')?.innerText;
-    if (currentFileName && appState.processed[currentFileName]) {
-        initTableSortable(currentFileName);
+// ==========================================
+// 9. INLINE EDIT & DRAG DROP LOGIC
+// ==========================================
+export function handleCellEdit(event, fileName, sheetType) {
+    if (event.type === 'keydown' && event.key === 'Enter') {
+        event.preventDefault();
+        event.target.blur(); // Memicu event onblur
+        return;
+    }
+    if (event.type !== 'blur') return;
+
+    const tr = event.target.closest('tr');
+    if (!tr) return;
+    const uuid = tr.getAttribute('data-uuid');
+    const colName = event.target.getAttribute('data-col');
+    let newValue = event.target.innerText.trim();
+
+    const processedData = appState.processed[fileName];
+    if (!processedData || !uuid) return;
+
+    let dataArr = sheetType === 'belowData' ? processedData.belowData : processedData.displayData;
+    const rowData = dataArr.find(r => r._uuid === uuid);
+
+    if (rowData && rowData[colName] !== newValue) {
+        rowData[colName] = newValue;
+        
+        // Update UI State agar sinkron
+        if (sheetType === 'belowData') {
+            const uiColName = colName.toLowerCase(); 
+            const curRow = appState.currentData.find(r => r._uuid === uuid);
+            if (curRow) curRow[uiColName] = newValue;
+            const filRow = appState.filteredData.find(r => r._uuid === uuid);
+            if (filRow) filRow[uiColName] = newValue;
+        }
+
+        showToast(`Cell [${colName}] updated`, 'success');
+        
+        // Panggil fungsi sinkronisasi pembentukan Workbook Excel dari validator.js
+        if (window.syncProcessedData) {
+            window.syncProcessedData(fileName);
+        }
+    }
+}
+
+export function initTableSortable(fileName) {
+    if (typeof Sortable === 'undefined') return;
+
+    const displayTbody = document.getElementById('display-ring-body');
+    const dataTbody = document.getElementById('data-table-body');
+
+    // Inisialisasi untuk display_ring
+    if (displayTbody && !displayTbody.sortableInstance) {
+        displayTbody.sortableInstance = new Sortable(displayTbody, {
+            handle: '.drag-handle',
+            animation: 150,
+            onEnd: function (evt) {
+                window.handleRowReorder(evt, fileName, 'displayData');
+            }
+        });
+    } else if (displayTbody && displayTbody.sortableInstance) {
+        // Update event jika file berbeda
+        displayTbody.sortableInstance.options.onEnd = function(evt) { window.handleRowReorder(evt, fileName, 'displayData'); };
+    }
+
+    // Inisialisasi untuk below_ring (Tenant Data)
+    if (dataTbody && !dataTbody.sortableInstance) {
+        dataTbody.sortableInstance = new Sortable(dataTbody, {
+            handle: '.drag-handle',
+            animation: 150,
+            onEnd: function (evt) {
+                window.handleRowReorder(evt, fileName, 'belowData');
+            }
+        });
+    } else if (dataTbody && dataTbody.sortableInstance) {
+        // Update event jika file berbeda
+        dataTbody.sortableInstance.options.onEnd = function(evt) { window.handleRowReorder(evt, fileName, 'belowData'); };
+    }
+}
+
+export function handleRowReorder(evt, fileName, sheetType) {
+    const itemEl = evt.item;
+    const uuid = itemEl.getAttribute('data-uuid');
+    if (!uuid || evt.oldIndex === evt.newIndex) return;
+
+    const processedData = appState.processed[fileName];
+    if (!processedData) return;
+
+    let dataArr = sheetType === 'belowData' ? processedData.belowData : processedData.displayData;
+    
+    // Cari index ASLI di memory berdasarkan UUID
+    const oldDataIndex = dataArr.findIndex(r => r._uuid === uuid);
+    if (oldDataIndex === -1) return;
+
+    let newDataIndex = 0;
+    if (evt.newIndex === 0) {
+        newDataIndex = 0;
+    } else {
+        const prevSibling = itemEl.previousElementSibling;
+        if (prevSibling) {
+            const prevUuid = prevSibling.getAttribute('data-uuid');
+            const prevDataIndex = dataArr.findIndex(r => r._uuid === prevUuid);
+            newDataIndex = oldDataIndex < prevDataIndex ? prevDataIndex : prevDataIndex + 1;
+        } else {
+            newDataIndex = evt.newIndex; // Fallback darurat
+        }
+    }
+
+    // Pindahkan Data pada Array Utama
+    const [movedItem] = dataArr.splice(oldDataIndex, 1);
+    dataArr.splice(newDataIndex, 0, movedItem);
+
+    // Sinkronkan ulang currentData & filteredData khusus untuk belowData agar tidak rusak saat di-filter
+    if (sheetType === 'belowData') {
+        appState.currentData = processedData.belowData.map(r => ({
+            _uuid: r._uuid,
+            strno: String(r.STRNO || ""),
+            pltxt: String(r.PLTXT || ""),
+            abckz: String(r.ABCKZ || ""),
+            stort: String(r.STORT || ""), 
+            arbpl: String(r.ARBPL || "")
+        }));
+        filterTable(); // Merender ulang berdasarkan filter yang sedang aktif
+    }
+
+    showToast('Row order successfully updated', 'info');
+    
+    // Panggil sinkronisasi ke File Download
+    if (window.syncProcessedData) {
+        window.syncProcessedData(fileName);
     }
 }
