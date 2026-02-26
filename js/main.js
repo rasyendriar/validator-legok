@@ -1,23 +1,38 @@
 import { MASTER_WC_CSV } from './config.js';
-import { appState, GameSystem } from './store.js';
+import { appState, GameSystem, SettingsSystem } from './store.js';
 import { downloadSingleExcel, triggerTextDownload } from './utils.js';
 import { initVisualizer, panViz, changeZoom, resetZoom } from './visualizer.js';
-import { handleDrop, handleFiles, startBatchValidation, downloadSummaryReport, downloadSapBatch } from './validator.js';
+import { handleDrop, handleFiles, startBatchValidation, downloadSummaryReport, downloadSapBatch, syncProcessedData } from './validator.js';
 import { initBatcher, runBatchMatching, viewMissingFiles, downloadBatchManifest, sendBatchToValidator } from './batcher.js';
 import { initConverter } from './converter.js';
 import {
     toggleDarkMode, initDarkMode, setupMainTabs, switchTab,
     toggleGuide, closeModal, closeMissingFiles, toggleBatchMenu, toggleSapMenu, closeDropdowns,
     setQueueFilter, filterQueueTable, showToast,
-    updateDashboardUI, updateRowStatusUI, updateTableRowVerifiedStatus,
+    recalculateStats, updateDashboardUI, updateRowStatusUI, updateTableRowVerifiedStatus,
     toggleVerification, toggleForceStatus, toggleForceStatusFromViz,
     clearValidatorQueueUI, navigateFile, openVisualizer,
-    setLenFilter, filterTable, changePage, downloadRowXlsx
+    setLenFilter, filterTable, changePage, downloadRowXlsx,
+    toggleSettingsModal, renderSettingsMenu, saveSettingsUI, // <-- NEW: Settings UI
+    handleCellEdit, initTableSortable, handleRowReorder      // <-- NEW: Inline Edit & Drag Drop
 } from './ui.js';
 
 // ==========================================
 // 1. MAPPING FUNGSI KE GLOBAL OBJECT WINDOW
 // ==========================================
+// Hal ini WAJIB dilakukan dalam arsitektur ES6 Module 
+// agar event inline HTML (seperti onclick="") bisa menemukan fungsinya.
+
+// Settings Menu
+window.toggleSettingsModal = toggleSettingsModal;
+window.saveSettingsUI = saveSettingsUI;
+
+// Data Sync & Inline Editing (Sangat Penting)
+window.handleCellEdit = handleCellEdit;
+window.initTableSortable = initTableSortable;
+window.handleRowReorder = handleRowReorder;
+window.syncProcessedData = syncProcessedData;
+
 // UI & Navigasi
 window.toggleDarkMode = toggleDarkMode;
 window.closeDropdowns = closeDropdowns;
@@ -41,7 +56,7 @@ window.filterQueueTable = filterQueueTable;
 window.toggleVerification = toggleVerification;
 window.toggleForceStatus = toggleForceStatus;
 window.toggleForceStatusFromViz = toggleForceStatusFromViz;
-window.downloadRowXlsx = downloadRowXlsx; // Menambahkan mapping untuk fungsi yang baru kita buat
+window.downloadRowXlsx = downloadRowXlsx;
 
 // Tenant Data Table (Modal)
 window.setLenFilter = setLenFilter;
@@ -113,24 +128,34 @@ window.downloadBatch = async function(type) {
 // ==========================================
 // 2. CROSS-MODULE DEPENDENCY BINDING
 // ==========================================
+// Modul validator.js kadang memanggil fungsi UI menggunakan window.*
 window.updateDashboardUI = updateDashboardUI;
 window.updateRowStatusUI = updateRowStatusUI;
 window.updateTableRowVerifiedStatus = updateTableRowVerifiedStatus;
+window.recalculateStats = recalculateStats;
 window.showToast = showToast;
 window.handleFiles = handleFiles;
+window.triggerTextDownload = triggerTextDownload;
 
 // ==========================================
 // 3. INISIALISASI SAAT DOM READY
 // ==========================================
 document.addEventListener("DOMContentLoaded", () => {
+    // 1. Inisialisasi Sistem Penyimpanan Terlebih Dahulu
+    SettingsSystem.init(); // Wajib dipanggil awal agar Rules siap
     GameSystem.init();
+    
+    // 2. Setup Tampilan
     initDarkMode();
     setupMainTabs();
+    
+    // 3. Setup Modul Terpisah
     initVisualizer();
     initBatcher();
     initConverter();
     setupKeyboardShortcuts();
     
+    // 4. Load Master Work Center Data
     const lines = MASTER_WC_CSV.split('\n');
     let loadedCount = 0;
     lines.forEach((line, index) => {
@@ -141,8 +166,9 @@ document.addEventListener("DOMContentLoaded", () => {
             loadedCount++;
         }
     });
-    console.log(`Loaded ${loadedCount} Work Center rules.`);
+    console.log(`[Config] Loaded ${loadedCount} Work Center rules.`);
 
+    // 5. Setup Drag & Drop Area untuk Validator
     const dropArea = document.getElementById('drop-area');
     const fileElem = document.getElementById('fileElem');
 
@@ -155,6 +181,8 @@ document.addEventListener("DOMContentLoaded", () => {
         dropArea.addEventListener('click', () => fileElem.click());
         fileElem.addEventListener('change', (e) => handleFiles(e.target.files), false);
     }
+    
+    console.log("🚀 SAP Migration Modular Suite v5.0 Ready!");
 });
 
 // ==========================================
@@ -165,7 +193,10 @@ function setupKeyboardShortcuts() {
         const modal = document.getElementById('vizModal');
         if (!modal || modal.classList.contains('hidden')) return;
 
-        if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+        // Jangan eksekusi shortcut jika user sedang mengetik di input / inline edit
+        if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.getAttribute('contenteditable') === 'true') {
+            return;
+        }
 
         if(['1','2','3','4'].includes(e.key)) {
             if(e.key === '1') switchTab('viz');
