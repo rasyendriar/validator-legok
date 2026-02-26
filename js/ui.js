@@ -1,5 +1,6 @@
 import { appState, GameSystem } from './store.js';
 import { generateSVG, applyZoom } from './visualizer.js';
+import { syncProcessedData } from './validator.js';
 
 // --- GLOBAL EVENT LISTENER: INLINE EDITING ---
 // Akan menangkap perubahan pada cell ber-atribut contenteditable="true"
@@ -43,6 +44,9 @@ document.addEventListener('blur', function(evt) {
                 if (filteredItem && filteredItem[lowerColName] !== undefined) filteredItem[lowerColName] = newValue;
             }
         }
+
+        // Sinkronisasi data yang diubah kembali ke memori file (Excel & SAP TXT)
+        syncProcessedData(fileName);
     }
 }, true); // Gunakan mode capture untuk event blur
 
@@ -62,7 +66,8 @@ export function initTableSortable(fileName) {
             ghostClass: 'sortable-ghost',
             onEnd: function (evt) {
                 const uuid = evt.item.getAttribute('data-uuid');
-                const activeData = appState.processed[document.getElementById('modalFileName').innerText];
+                const fileName = document.getElementById('modalFileName').innerText;
+                const activeData = appState.processed[fileName];
                 
                 const oldIndex = activeData.displayData.findIndex(r => r._uuid === uuid);
                 if (oldIndex === -1) return;
@@ -71,6 +76,9 @@ export function initTableSortable(fileName) {
                 const newIndex = evt.newIndex;
                 const [movedItem] = activeData.displayData.splice(oldIndex, 1);
                 activeData.displayData.splice(newIndex, 0, movedItem);
+                
+                // Sinkronisasi pemindahan urutan ke memori file (Excel & SAP TXT)
+                syncProcessedData(fileName);
                 
                 showToast('Urutan Display Data berhasil diperbarui', 'success');
             }
@@ -86,7 +94,8 @@ export function initTableSortable(fileName) {
             ghostClass: 'sortable-ghost',
             onEnd: function (evt) {
                 const uuid = evt.item.getAttribute('data-uuid');
-                const activeData = appState.processed[document.getElementById('modalFileName').innerText];
+                const fileName = document.getElementById('modalFileName').innerText;
+                const activeData = appState.processed[fileName];
                 
                 // Dapatkan indeks asli relatif terhadap pagination halaman saat ini
                 const startIdx = (appState.currentPage - 1) * appState.rowsPerPage;
@@ -129,6 +138,9 @@ export function initTableSortable(fileName) {
                     stort: String(r.STORT || ""), 
                     arbpl: String(r.ARBPL || "")
                 }));
+
+                // Sinkronisasi pemindahan urutan ke memori file (Excel & SAP TXT)
+                syncProcessedData(fileName);
 
                 showToast('Urutan Tenant Data berhasil diperbarui', 'success');
             }
