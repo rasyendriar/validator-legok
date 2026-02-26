@@ -127,7 +127,7 @@ export async function processFile(file, rowId) {
         
         let rawBelow = XLSX.utils.sheet_to_json(workbook.Sheets['below_ring'], { defval: "" });
         
-        // Add row index
+        // --- MODIFIKASI: Add UUID and row index ---
         let belowData = rawBelow.map((r, idx) => {
             const newRow = {};
             Object.keys(r).forEach(k => {
@@ -136,6 +136,7 @@ export async function processFile(file, rowId) {
                 newRow[upperK] = r[k];
             });
             newRow._rowIndex = idx + 2; 
+            newRow._uuid = crypto.randomUUID(); // Tambahan UUID Unik untuk Drag & Drop
             return newRow;
         });
 
@@ -380,6 +381,7 @@ export async function processFile(file, rowId) {
             displayData = rawDisplay.map(r => {
                 const newRow = {};
                 Object.keys(r).forEach(k => newRow[k.toUpperCase().trim()] = r[k]);
+                newRow._uuid = crypto.randomUUID(); // --- MODIFIKASI: Tambahan UUID untuk display_ring ---
                 return newRow;
             });
 
@@ -462,8 +464,9 @@ export async function processFile(file, rowId) {
 
         const newWb = XLSX.utils.book_new();
         
+        // --- MODIFIKASI: Hapus _uuid saat akan di-export agar tidak muncul di file Excel ---
         const exportBelowData = belowData.map(r => {
-            const { STRNO_LENGTH, _rowIndex, ...rest } = r;
+            const { STRNO_LENGTH, _rowIndex, _uuid, ...rest } = r; 
             return rest;
         });
 
@@ -476,7 +479,12 @@ export async function processFile(file, rowId) {
         XLSX.utils.book_append_sheet(newWb, wsBelow, "below_ring");
 
         if (displayData.length) {
-            const wsDisplay = XLSX.utils.json_to_sheet(displayData);
+            // --- MODIFIKASI: Hapus _uuid dari data display_ring untuk export ---
+            const exportDisplayData = displayData.map(r => {
+                const { _uuid, ...rest } = r;
+                return rest;
+            });
+            const wsDisplay = XLSX.utils.json_to_sheet(exportDisplayData);
             XLSX.utils.book_append_sheet(newWb, wsDisplay, "display_ring");
         }
 
