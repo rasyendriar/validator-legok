@@ -1,5 +1,6 @@
 import { appState, GameSystem } from './store.js';
 import { generateSVG, applyZoom } from './visualizer.js';
+import { downloadSingleExcel } from './utils.js'; // Tambahkan import ini
 
 // --- DARK MODE LOGIC ---
 export function toggleDarkMode() {
@@ -249,6 +250,15 @@ export function updateDashboardUI() {
     if (el('badge-sap-pass')) el('badge-sap-pass').innerText = appState.stats.pass;
 }
 
+// --- FUNGSI DOWNLOAD SINGLE ROW (Baru ditambahkan) ---
+export function downloadRowXlsx(fileName) {
+    const item = appState.processed[fileName];
+    if(item && item.wb) {
+        // Panggil fungsi dari utils.js untuk mendownload array buffer excel
+        downloadSingleExcel(item.wb, `VALIDATED_v4_${item.fileName}`);
+    }
+}
+
 export function updateRowStatusUI(rowId, item) {
     const row = document.getElementById(rowId);
     if (!row) return;
@@ -275,8 +285,7 @@ export function updateRowStatusUI(rowId, item) {
     const toggleTitle = item.status === 'PASS' ? 'Force Fail' : 'Force Pass';
     const toggleColor = item.status === 'PASS' ? 'text-red-500 hover:bg-red-50' : 'text-green-500 hover:bg-green-50';
 
-    // To avoid creating real Object URLs here (which leaks memory), we just export triggerDownload. 
-    // In real module, we bind the functions to window in main.js
+    // Perbaikan: Ubah window.downloadXlsxFile menjadi window.downloadRowXlsx
     actionCell.innerHTML = `
         <div class="flex items-center justify-center gap-2">
             <button onclick="window.openVisualizer('${item.fileName}')" class="bg-slate-100 hover:bg-slate-200 dark:bg-gray-700 dark:hover:bg-gray-600 text-slate-700 dark:text-white p-2 rounded-lg transition" title="Visualize">
@@ -285,7 +294,7 @@ export function updateRowStatusUI(rowId, item) {
             <button onclick="window.toggleForceStatus('${item.fileName}')" class="bg-white border border-gray-200 dark:bg-gray-800 dark:border-gray-600 ${toggleColor} p-2 rounded-lg transition" title="${toggleTitle}">
                <i class="fa-solid ${toggleIcon}"></i>
             </button>
-            <button onclick="window.downloadXlsxFile('${item.fileName}')" class="bg-blue-50 hover:bg-blue-100 dark:bg-blue-900/20 dark:hover:bg-blue-900/40 text-blue-600 dark:text-blue-300 p-2 rounded-lg transition" title="Download XLSX">
+            <button onclick="window.downloadRowXlsx('${item.fileName}')" class="bg-blue-50 hover:bg-blue-100 dark:bg-blue-900/20 dark:hover:bg-blue-900/40 text-blue-600 dark:text-blue-300 p-2 rounded-lg transition" title="Download XLSX">
                <i class="fa-solid fa-file-excel"></i>
             </button>
             <button onclick="window.downloadSapTxt('${item.fileName}')" class="bg-emerald-50 hover:bg-emerald-100 dark:bg-emerald-900/20 dark:hover:bg-emerald-900/40 text-emerald-600 dark:text-emerald-300 p-2 rounded-lg transition" title="Download SAP TXT">
@@ -466,7 +475,7 @@ export function openVisualizer(fileName) {
 
     switchTab('viz');
     
-    applyZoom(); // Reset Zoom handle logic should be inside viz or main
+    applyZoom(); 
     
     generateSVG(data.displayData, data.belowData, data.pid);
     renderDisplayRingTable(data.displayData);
