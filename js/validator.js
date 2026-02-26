@@ -5,26 +5,13 @@ import { buildSapTxtFromRows, extractAnchorPid } from './utils.js';
 // HELPER: CENTRALIZED ERROR REPORTING
 // ==========================================
 function reportIssue(ruleId, row, message, defaultSeverity, errors, warnings) {
-    // 1. Ambil pengaturan dari Settings Menu untuk rule terkait
     const action = SettingsSystem.getRuleAction(ruleId);
-    
-    // 2. Jika di-disable oleh user, abaikan (return)
     if (!action.enabled) return; 
     
-    // 3. Format error
-    const issue = { 
-        Rule: ruleId, 
-        Row: row, 
-        Message: message, 
-        Severity: action.severity 
-    };
+    const issue = { Rule: ruleId, Row: row, Message: message, Severity: action.severity };
     
-    // 4. Masukkan ke keranjang yang sesuai (Berdasarkan pengaturan User, bukan hardcode)
-    if (action.severity === 'FAIL') {
-        errors.push(issue);
-    } else {
-        warnings.push(issue);
-    }
+    if (action.severity === 'FAIL') errors.push(issue);
+    else warnings.push(issue);
 }
 
 // ==========================================
@@ -55,9 +42,7 @@ export function handleFiles(files) {
             tr.innerHTML = `
                 <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">${tbody.children.length + 1}</td>
                 <td class="px-6 py-4 whitespace-nowrap text-sm font-medium text-slate-900 dark:text-white">${file.name}</td>
-                <td class="px-6 py-4 whitespace-nowrap text-center">
-                    <span class="bg-gray-100 text-gray-600 px-3 py-1 rounded-md text-xs font-bold uppercase">Pending</span>
-                </td>
+                <td class="px-6 py-4 whitespace-nowrap text-center"><span class="bg-gray-100 text-gray-600 px-3 py-1 rounded-md text-xs font-bold uppercase">Pending</span></td>
                 <td class="px-6 py-4 whitespace-nowrap text-center text-gray-300">-</td>
                 <td class="px-6 py-4 text-sm text-gray-500">Waiting for validation...</td>
                 <td class="px-6 py-4 whitespace-nowrap text-center">-</td>
@@ -65,7 +50,6 @@ export function handleFiles(files) {
             tbody.appendChild(tr);
         }
     });
-    
     if (window.showToast) window.showToast(`${files.length} file(s) added to queue`, 'info');
 }
 
@@ -109,47 +93,32 @@ export async function processFile(file) {
                 const data = new Uint8Array(e.target.result);
                 const wb = XLSX.read(data, { type: 'array' });
                 
-                if (!wb.Sheets['below_ring']) {
-                    throw new Error("Missing 'below_ring' sheet.");
-                }
+                if (!wb.Sheets['below_ring']) throw new Error("Missing 'below_ring' sheet.");
 
                 const rawBelow = XLSX.utils.sheet_to_json(wb.Sheets['below_ring'], { defval: "" });
                 const rawDisplay = wb.Sheets['display_ring'] ? XLSX.utils.sheet_to_json(wb.Sheets['display_ring'], { defval: "" }) : [];
                 
-                // Inject UUID dan rowIndex untuk fitur Sinkronisasi UI
                 const belowData = rawBelow.map((r, i) => ({ ...r, _rowIndex: i + 2, _uuid: crypto.randomUUID() }));
                 const displayData = rawDisplay.map((r, i) => ({ ...r, _rowIndex: i + 2, _uuid: crypto.randomUUID() }));
 
                 const errors = [];
                 const warnings = [];
                 let fileStatus = "PASS";
-                let anchorPid = "";
+                
+                // Ambil PID (Penyelesaian bug fungsi utils.js)
+                let anchorPid = extractAnchorPid(belowData) || extractAnchorPid(file.name);
 
-                // ====================================
-                // EXECUTE RULES ENGINE
-                // ====================================
                 if (belowData.length === 0) {
                     reportIssue('R7', 'Sheet', 'below_ring is empty', 'FAIL', errors, warnings);
                 } else {
-                    // FIX: Menggunakan file.name sebagai ganti belowData untuk menghindari .replace is not a function error
-                    anchorPid = extractAnchorPid(file.name); 
-                    
-                    // Jika anchorPid masih kosong (file.name tidak memuat PID), coba cari dari baris pertama PLTXT sebagai fallback
-                    if (!anchorPid && belowData[0] && belowData[0].PLTXT) {
-                         const match = String(belowData[0].PLTXT).match(/(PID-\d+)/i);
-                         if (match) anchorPid = match[1].toUpperCase();
-                    }
-                    
-                    // R6: Cek Kolom Wajib
                     const reqCols = ['STRNO', 'PLTXT', 'ABCKZ', 'STORT', 'ARBPL'];
                     reqCols.forEach(col => {
-                        if (!(col in belowData[0])) {
-                            reportIssue('R6', 'Header', `Missing required column: ${col}`, 'FAIL', errors, warnings);
-                        }
+                        if (!(col in belowData[0])) reportIssue('R6', 'Header', `Missing required column: ${col}`, 'FAIL', errors, warnings);
                     });
 
                     let seqGroups = {};
                     let parentChildMap = {};
+                    let elementTypes = {};
 
                     belowData.forEach(row => {
                         const rIdx = row._rowIndex;
@@ -159,17 +128,14 @@ export async function processFile(file) {
                         const stort = String(row.STORT || "").trim();
                         const arbpl = String(row.ARBPL || "").trim();
 
-                        // R7: Data Kosong
                         if (!strno || !pltxt || !abckz || !stort || !arbpl) {
                             reportIssue('R7', `Row ${rIdx}`, `Empty cell detected in mandatory columns`, 'FAIL', errors, warnings);
                         }
 
-                        // R9: Anchor PID Consistency
                         if (pltxt && anchorPid && !pltxt.includes(anchorPid)) {
                             reportIssue('R9', strno || `Row ${rIdx}`, `PLTXT '${pltxt}' does not contain Anchor PID '${anchorPid}'`, 'FAIL', errors, warnings);
                         }
 
-                        // R13: Validasi Work Center
                         if (stort && arbpl) {
                             const expectedArbpl = appState.workCenterData.get(stort);
                             if (expectedArbpl && expectedArbpl !== arbpl) {
@@ -177,52 +143,69 @@ export async function processFile(file) {
                             }
                         }
 
-                        // R12 & R15: Panjang STRNO
                         if (strno) {
                             const len = strno.length;
                             if (![17, 21, 26, 30].includes(len)) {
                                 reportIssue('R15', strno, `Invalid STRNO length (${len}). Must be 17, 21, 26, or 30`, 'FAIL', errors, warnings);
                             }
 
-                            // Ekstraksi untuk Rule 17 (Sequential Numbering)
+                            // R19 Mapping: Extract Parent
+                            let parentStrno = "";
+                            if (len === 21) parentStrno = strno.substring(0, 17);
+                            if (len === 26) parentStrno = strno.substring(0, 21);
+                            if (len === 30) parentStrno = strno.substring(0, 26);
+
+                            if (parentStrno) {
+                                if (!parentChildMap[parentStrno]) parentChildMap[parentStrno] = [];
+                                parentChildMap[parentStrno].push(strno);
+                            }
+
+                            // R11, R14, R17 Logic
                             if (len >= 26) {
-                                const baseMatch = strno.match(/(.*?)-([A-Z]+)(\d+)$/);
-                                if (baseMatch) {
-                                    const baseKey = `${stort}_${arbpl}_${baseMatch[1]}_${baseMatch[2]}`;
-                                    const num = parseInt(baseMatch[3], 10);
-                                    
+                                const tagMatch = strno.match(/-([A-Z]+)(\d+)$/i);
+                                if (!tagMatch) {
+                                    reportIssue('R11', strno, `Invalid tag format in STRNO (Expected -TAG01)`, 'FAIL', errors, warnings);
+                                } else {
+                                    const tag = tagMatch[1].toUpperCase();
+                                    const num = parseInt(tagMatch[2], 10);
+                                    elementTypes[strno] = tag;
+
+                                    // R14: ABCKZ vs Tag Consistency
+                                    let expectedAbckz = "";
+                                    if (["FDC", "FAT", "JB", "SJB", "TB", "ODP"].includes(tag)) expectedAbckz = "OC";
+                                    else if (["FDT"].includes(tag)) expectedAbckz = "JC";
+                                    else if (["SPL"].includes(tag)) expectedAbckz = "DP";
+                                    else if (["ODC"].includes(tag)) expectedAbckz = "KU";
+
+                                    if (expectedAbckz && abckz !== expectedAbckz) {
+                                        reportIssue('R14', strno, `Tag '${tag}' expects ABCKZ '${expectedAbckz}', but got '${abckz}'`, 'FAIL', errors, warnings);
+                                    }
+
+                                    // R17 Grouping
+                                    const baseKey = `${stort}_${arbpl}_${tag}`; // Base sequence grouping
                                     if (!seqGroups[baseKey]) seqGroups[baseKey] = [];
                                     seqGroups[baseKey].push({ strno, num, abckz, pltxt });
                                 }
                             }
-
-                            // Ekstraksi untuk Rule 19 (Parent Connectivity)
-                            if (len > 17) {
-                                const parentStrno = strno.substring(0, len === 21 ? 17 : len === 26 ? 21 : 26);
-                                if (!parentChildMap[parentStrno]) parentChildMap[parentStrno] = [];
-                                parentChildMap[parentStrno].push(strno);
-                            }
                         }
                     });
 
-                    // R17: Post-Process Sequential Numbering (Dengan Pengecualian OC)
+                    // ====================================
+                    // R17: SEQUENTIAL NUMBERING & OC00 EXCEPTION
+                    // ====================================
                     for (const [key, items] of Object.entries(seqGroups)) {
                         items.sort((a, b) => a.num - b.num);
-                        
                         const firstItem = items[0];
-                        // CEK OC00 EXCEPTION
-                        const isOC = firstItem.abckz === 'OC' || firstItem.pltxt.includes('OC00') || firstItem.strno.match(/OC\d+$/);
                         
-                        // Jika elemen OC, targetnya adalah 0. Selain itu 1.
+                        // EXCEPTION: Jika ABCKZ adalah OC atau PLTXT mengandung OC, angka boleh mulai dari 0.
+                        const isOC = firstItem.abckz === 'OC' || firstItem.pltxt.includes('OC00') || firstItem.strno.match(/OC\d+$/i);
                         const expectedStart = isOC ? 0 : 1;
                         const actualStart = firstItem.num;
 
-                        // Peringatan jika angka awal salah (Toleransi: Walau OC00 boleh, jika diisi 1 tetap boleh (Aman))
                         if (actualStart !== expectedStart && actualStart !== 1) { 
                             reportIssue('R17', firstItem.strno, `Starts with ${actualStart}, expected ${expectedStart} or 1`, 'FAIL', errors, warnings);
                         }
 
-                        // Cek lompatan angka (Gap / Duplicate)
                         for (let i = 0; i < items.length - 1; i++) {
                             const diff = items[i+1].num - items[i].num;
                             if (diff > 1) {
@@ -233,24 +216,55 @@ export async function processFile(file) {
                         }
                     }
 
-                    // R19: Post-Process Parent Connectivity
+                    // ====================================
+                    // R16, R18, R19: TOPOLOGY CHECKS
+                    // ====================================
                     belowData.forEach(row => {
-                        if (row.STRNO && row.STRNO.length < 30) {
-                            const children = parentChildMap[row.STRNO];
-                            if (!children || children.length === 0) {
-                                reportIssue('R19', row.STRNO, `Element has no children. Potential dangling asset.`, 'WARNING', errors, warnings);
-                            }
+                        const strno = row.STRNO;
+                        if (!strno) return;
+                        
+                        const children = parentChildMap[strno] || [];
+                        const tag = elementTypes[strno];
+
+                        // R19: Connectivity (Parent Check)
+                        if (strno.length > 17 && strno.length <= 30) {
+                             let parentStrno = "";
+                             if (strno.length === 21) parentStrno = strno.substring(0, 17);
+                             if (strno.length === 26) parentStrno = strno.substring(0, 21);
+                             if (strno.length === 30) parentStrno = strno.substring(0, 26);
+
+                             const parentExists = belowData.some(r => r.STRNO === parentStrno);
+                             if (!parentExists) {
+                                 reportIssue('R19', strno, `Parent element (${parentStrno}) not found in below_ring. Broken connectivity.`, 'WARNING', errors, warnings);
+                             }
+                        }
+
+                        // R18: High Occupancy (Capacity Check)
+                        if (tag === 'ODC' && children.length >= 129) {
+                             reportIssue('R18', strno, `High Occupancy on ODC (${children.length} children, max ~144)`, 'WARNING', errors, warnings);
+                        } else if (["FAT", "ODP"].includes(tag) && children.length >= 7) {
+                             reportIssue('R18', strno, `High Occupancy on ${tag} (${children.length} children, max ~8)`, 'WARNING', errors, warnings);
+                        }
+
+                        // R16: Anti-Split Check (Cascaded splitters)
+                        if (tag === 'SPL') {
+                             const splChildren = children.filter(c => elementTypes[c] === 'SPL');
+                             if (splChildren.length > 0) {
+                                 reportIssue('R16', strno, `Cascaded Splitter detected: SPL feeding into another SPL`, 'WARNING', errors, warnings);
+                             }
                         }
                     });
                 }
 
-                // R20: Display Ring Logic
+                // ====================================
+                // R20: DISPLAY RING LOGIC
+                // ====================================
                 if (displayData.length > 0) {
                     for (let i = 0; i < displayData.length - 1; i++) {
                         const curr = displayData[i].SEQUENCE;
                         const next = displayData[i+1].SEQUENCE;
                         if (curr && next && parseInt(next) < parseInt(curr)) {
-                            reportIssue('R20', `Row ${displayData[i+1]._rowIndex}`, 'Display Chain Sequence out of order', 'WARNING', errors, warnings);
+                            reportIssue('R20', `Row ${displayData[i+1]._rowIndex}`, 'Display Chain SEQUENCE out of order', 'WARNING', errors, warnings);
                         }
                     }
                 } else {
@@ -279,7 +293,10 @@ export async function processFile(file) {
                 };
                 appState.processedKeys.push(file.name);
 
-                if (fileStatus === 'PASS' && anchorPid) GameSystem.addXp(5);
+                // Add Gamification XP !
+                if (fileStatus === 'PASS' && anchorPid) {
+                    try { GameSystem.addXp(5); } catch(e) { console.warn("XP Add Failed", e); }
+                }
 
                 if (tr) {
                     tr.cells[1].innerHTML = `<div class="flex flex-col">
@@ -313,13 +330,10 @@ export async function processFile(file) {
 // ==========================================
 // DATA SYNC & EXPORT ACTIONS
 // ==========================================
-
-// Fungsi ini dipanggil dari UI setelah User mengubah data (Inline Edit / Drag Drop)
 export function syncProcessedData(fileName) {
     const item = appState.processed[fileName];
     if (!item) return;
 
-    // 1. Bersihkan _uuid dan _rowIndex agar tidak ter-export ke Excel/SAP
     const cleanBelow = item.belowData.map(r => {
         const newRow = { ...r };
         delete newRow._uuid;
@@ -334,10 +348,8 @@ export function syncProcessedData(fileName) {
         return newRow;
     });
 
-    // 2. Rebuild SAP TXT
     item.sapTxt = buildSapTxtFromRows(cleanBelow);
 
-    // 3. Rebuild Workbook (Memastikan file Excel sinkron dengan UI)
     const newWb = XLSX.utils.book_new();
     const wsBelow = XLSX.utils.json_to_sheet(cleanBelow);
     XLSX.utils.book_append_sheet(newWb, wsBelow, "below_ring");
